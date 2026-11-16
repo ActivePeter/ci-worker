@@ -45,6 +45,7 @@ jobs:
           token: ${{ secrets.GIE_GIT_TOKEN }}
           path: test
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Mark pending status on test
         env:
