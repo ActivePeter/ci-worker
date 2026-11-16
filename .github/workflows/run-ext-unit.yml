@@ -40,7 +40,9 @@ jobs:
           persist-credentials: false
 
       - name: Use job-local Rust toolchains
-        run: echo "RUSTUP_HOME=$RUNNER_TEMP/gie-rustup" >> "$GITHUB_ENV"
+        run: |
+          echo "RUSTUP_HOME=$RUNNER_TEMP/gie-rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$RUNNER_TEMP/gie-cargo" >> "$GITHUB_ENV"
 
       - name: Resolve pins
         id: pins
