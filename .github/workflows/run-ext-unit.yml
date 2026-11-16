@@ -49,6 +49,17 @@ jobs:
           path: ext
           persist-credentials: false
 
+      - name: Mark pending status on ext
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          head=$(git -C ext rev-parse HEAD)
+          curl -fsS -X POST \
+            -H "Authorization: token ${GIE_GIT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/goodputai/goodput-infer-ext/statuses/$head" \
+            -d '{"state":"pending","context":"ci/public-worker/unit","description":"public CI unit running"}'
+
       - name: Use job-local Rust toolchains
         run: |
           echo "RUSTUP_HOME=$RUNNER_TEMP/gie-rustup" >> "$GITHUB_ENV"
@@ -135,4 +146,4 @@ jobs:
             -H "Authorization: token ${GIE_GIT_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/goodputai/goodput-infer-ext/statuses/$head" \
-            -d "{\"state\":\"$state\",\"context\":\"ci/public-worker/unit\",\"description\":\"public CI unit $state\"}"
+            -d "{\"state\":\"$state\",\"context\":\"ci/public-worker/unit\",\"description\":\"public CI unit $state\",\"target_url\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"}"
