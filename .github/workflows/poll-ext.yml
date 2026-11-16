@@ -1,0 +1,80 @@
+name: poll-ext
+
+# Solution A: the public worker polls goodputai/goodput-infer-ext for work, so
+# ext does NOT need any of its own (billing-blocked) GitHub-hosted runners to
+# kick the public CI. Every 5 minutes this enumerates ext's open PR head SHAs
+# (non-fork only) plus main's HEAD, and for each ref whose latest
+# `ci/public-worker/unit` status is neither `success` nor `pending`, it queues a
+# `run-ext-unit` run on this public repo. The status is marked `pending` here
+# before dispatch so a later poll does not double-queue the same ref.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "only poll this specific ref (empty = all open PRs + main)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Queue public unit CI for ext refs that need it
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          TOKEN="$(printf %s "$GIE_GIT_TOKEN" | tr -d '[:space:]')"
+          [ -n "$TOKEN" ] || { echo '::error::GIE_GIT_TOKEN empty'; exit 1; }
+          echo "::add-mask::$TOKEN"
+          API="https://api.github.com"
+          H1="Authorization: token ${TOKEN}"
+          H2="Accept: application/vnd.github+json"
+          EXT="goodputai/goodput-infer-ext"
+          CTX="ci/public-worker/unit"
+
+          only="${{ github.event.inputs.ref }}"
+          if [ -n "$only" ]; then
+            refs="$only"
+          else
+            prs=$(curl -fsS -H "$H1" -H "$H2" "$API/repos/$EXT/pulls?state=open&per_page=100")
+            main=$(curl -fsS -H "$H1" -H "$H2" "$API/repos/$EXT/commits/main")
+            refs=$(printf '%s\n%s\n' \
+              "$(printf '%s' "$prs" | jq -r '.[] | select(.head.repo.full_name=="goodputai/goodput-infer-ext") | .head.sha')" \
+              "$(printf '%s' "$main" | jq -r '.sha')" \
+              | sort -u | grep -v '^$')
+          fi
+
+          dispatched=0
+          for ref in $refs; do
+            resp=$(curl -sS -w $'\n%{http_code}' -H "$H1" -H "$H2" "$API/repos/$EXT/commits/$ref/status")
+            code=$(printf '%s' "$resp" | tail -n 1)
+            body=$(printf '%s' "$resp" | sed '$d')
+            if [ "$code" != "200" ]; then
+              echo "skip $ref (status fetch HTTP $code)"
+              continue
+            fi
+            state=$(printf '%s' "$body" | jq -r --arg ctx "$CTX" \
+              '[.statuses[]? | select(.context==$ctx)] | sort_by(.updated_at) | .[-1].state // empty')
+            case "$state" in
+              success) echo "skip $ref (already success)"; continue ;;
+              pending) echo "skip $ref (in-flight)"; continue ;;
+            esac
+
+            echo "queue $ref (current=${state:-none})"
+            curl -fsS -X POST -H "$H1" -H "$H2" \
+              "$API/repos/$EXT/statuses/$ref" \
+              -d "{\"state\":\"pending\",\"context\":\"$CTX\",\"description\":\"queued by poll\"}"
+            curl -fsS -X POST -H "$H1" -H "$H2" \
+              "$API/repos/ActivePeter/ci-worker/dispatches" \
+              -d "{\"event_type\":\"run-ext-unit\",\"client_payload\":{\"ref\":\"$ref\",\"source\":\"poll\"}}"
+            dispatched=$((dispatched+1))
+          done
+          echo "::notice::poll dispatched=$dispatched"
