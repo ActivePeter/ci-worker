@@ -9,7 +9,7 @@ name: run-ci-for-private-repo
 # Trigger:
 #   - workflow_dispatch: manual, from the Actions tab.
 #   - repository_dispatch[run-ci]: a private repo POSTs to
-#       https://api.github.com/repos/goodputai/ci-worker/dispatches
+#       https://api.github.com/repos/ActivePeter/ci-worker/dispatches
 #     with a token, body:
 #       {"event_type":"run-ci","client_payload":{"target_repo":"goodputai/dynamo","ref":"main","run":"git rev-parse HEAD"}}
 #

@@ -28,7 +28,7 @@ are capped at 2000 min/month; public repos are not).
 From a private repo that has a token with write access to this repo:
 
 ```bash
-curl -X POST https://api.github.com/repos/goodputai/ci-worker/dispatches \
+curl -X POST https://api.github.com/repos/ActivePeter/ci-worker/dispatches \
   -H "Authorization: token $TOKEN" \
   -H "Accept: application/vnd.github+json" \
   -d '{"event_type":"run-ci","client_payload":{"target_repo":"goodputai/dynamo","ref":"main","run":"git rev-parse HEAD"}}'
