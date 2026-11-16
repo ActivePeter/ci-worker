@@ -21,6 +21,8 @@ on:
         description: "ext branch / tag / SHA to run unit CI on"
         required: false
         default: "main"
+  repository_dispatch:
+    types: [run-ext-unit]
 
 permissions:
   contents: read
@@ -30,11 +32,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
+      - name: Resolve ref (workflow_dispatch or repository_dispatch)
+        id: ref
+        run: |
+          ref="${{ github.event.inputs.ref }}"
+          if [ -z "$ref" ]; then ref="${{ github.event.client_payload.ref }}"; fi
+          echo "ref=${ref:-main}" >> "$GITHUB_OUTPUT"
+          echo "source=${{ github.event_name }}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout ext (private) via token
         uses: actions/checkout@v4
         with:
           repository: goodputai/goodput-infer-ext
-          ref: ${{ inputs.ref }}
+          ref: ${{ steps.ref.outputs.ref }}
           token: ${{ secrets.GIE_GIT_TOKEN }}
           path: ext
           persist-credentials: false
