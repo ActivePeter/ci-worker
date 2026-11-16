@@ -8,14 +8,23 @@ name: run-dynamo-unit
 # dynamo is checked out at runtime via GIE_GIT_TOKEN; nothing private is
 # committed to this public repo.
 #
+# Refs covered: main, release/*.*.* (verified for main, release/1.6.1 and
+# release/shm-1.4.0 -- all pin toolchain 1.96.1 and expose the same
+# kvbm/rcommu package set, so one command list serves every ref).
+#
 # Deliberately NOT ported:
 #   - confirm-debug (continue-on-error diagnostic, not gating)
 #   - pre-merge.yml rust-tests / rust-clippy (gated to upstream ai-dynamo/dynamo)
 #   - dynamo-pipeline.yml rust-gpu / mypy (self-hosted GPU fleet)
 #   - nightly-ci.yml rust-tests (self-hosted Fastchecker coverage)
 #
-# No gie-git-auth insteadOf needed here: dynamo's Cargo.lock git deps are only
-# public (ai-dynamo/aiconfigurator, vllm-project/vllm).
+# Private-ext authentication (inlined, NOT via the gie-git-auth composite
+# action): that action lives in the PRIVATE goodputai/goodput-infer-ext
+# repository, which a public repo cannot `uses:`. release/* Cargo.locks pin
+# gie-etcd-resilience from that private repo (main's lockfile is
+# public-only), so cargo fetch needs the insteadOf rewrite on release refs.
+# The auth step always runs: it self-skips when the checkout's Cargo.lock has
+# no private reference, so main pays no cost and release refs authenticate.
 
 on:
   workflow_dispatch:
@@ -76,6 +85,26 @@ jobs:
           # dynamo's rust-toolchain.toml (channel 1.96.1) selects the toolchain
           # when cargo runs; the install above just warms the cache.
 
+      - name: Configure private ext access (release refs only)
+        # Inline port of dynamo's gie-git-auth: the composite action lives in
+        # the private goodputai/goodput-infer-ext repo, unusable from public
+        # ci-worker. Self-skips when this checkout's Cargo.lock pins no
+        # private ext dependency (true for main).
+        working-directory: dynamo
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          if grep -Fq 'goodputai/goodput-infer-ext' Cargo.lock; then
+            echo '::add-mask::'"${GIE_GIT_TOKEN}"
+            git config --global \
+              "url.https://x-access-token:${GIE_GIT_TOKEN}@github.com/goodputai/goodput-infer-ext.insteadOf" \
+              "https://github.com/goodputai/goodput-infer-ext"
+            echo '已配置 goodput-infer-ext 私库认证（release ref）'
+          else
+            echo 'Cargo.lock 未引用 goodput-infer-ext，跳过认证（main 等公开依赖 ref）'
+          fi
+
       - name: Test node-local RPC transport
         working-directory: dynamo
         run: cargo test --locked -p rcommu-lite
@@ -113,6 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           head=$(git -C dynamo rev-parse HEAD)
+
           if [ "${{ job.status }}" = "success" ]; then state="success"; else state="failure"; fi
           echo "::add-mask::$GIE_GIT_TOKEN"
           curl -fsS -X POST \
