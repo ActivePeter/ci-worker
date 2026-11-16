@@ -1,0 +1,113 @@
+name: run-test-unit
+
+# Public CI for goodputai/test's (testkit) lightweight CPU work: the python unit
+# suite + static checks. This is a port of the pure-CPU jobs in test's ci.yml
+# (`static` + `unit`), run on a free public GitHub-hosted runner instead of
+# test's self-hosted testkit-ci runners. test is checked out at runtime via
+# GIE_GIT_TOKEN; nothing private is committed to this public repo.
+#
+# Deliberately NOT ported (need the real testkit environment / docker):
+#   - docker-builder-preflight (rootless docker socket)
+#   - burst-driver-loaded (real HTTP 1000-stream calibration)
+#   - reset1-product (needs ext checkout + real policy, dispatch-only)
+# These stay on test's self-hosted runners for now.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "test branch / tag / SHA to run unit CI on"
+        required: false
+        default: "main"
+  repository_dispatch:
+    types: [run-test-unit]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Resolve ref (workflow_dispatch or repository_dispatch)
+        id: ref
+        run: |
+          ref="${{ github.event.inputs.ref }}"
+          if [ -z "$ref" ]; then ref="${{ github.event.client_payload.ref }}"; fi
+          echo "ref=${ref:-main}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout test (private) via token
+        uses: actions/checkout@v4
+        with:
+          repository: goodputai/test
+          ref: ${{ steps.ref.outputs.ref }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: test
+          persist-credentials: false
+
+      - name: Mark pending status on test
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          head=$(git -C test rev-parse HEAD)
+          curl -fsS -X POST \
+            -H "Authorization: token ${GIE_GIT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/goodputai/test/statuses/$head" \
+            -d '{"state":"pending","context":"ci/public-worker/test-unit","description":"public CI test unit running"}'
+
+      - name: Configure private-repo git auth (inlined gie-git-auth)
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          TOKEN="$(printf %s "$GIE_GIT_TOKEN" | tr -d '[:space:]')"
+          [ -n "$TOKEN" ] || { echo '::error::GIE_GIT_TOKEN empty'; exit 1; }
+          echo "::add-mask::$TOKEN"
+          for r in sglang dynamo test goodput-infer-ext; do
+            git config --global \
+              "url.https://x-access-token:${TOKEN}@github.com/goodputai/${r}.insteadOf" \
+              "https://github.com/goodputai/${r}"
+          done
+          echo 'CARGO_NET_GIT_FETCH_WITH_CLI=true' >> "$GITHUB_ENV"
+
+      - name: Install uv (inlined ci-python, GitHub-hosted path)
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+
+      - name: Prepare locked Python through testkit
+        working-directory: test
+        env:
+          TESTKIT_CI: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 testkit env prepare --uv uv --cache-config config/cache-ephemeral.json --export-github
+
+      - name: Static checks
+        working-directory: test
+        env:
+          TESTKIT_CI: '1'
+        run: python scripts/ci.py static
+
+      - name: Unit tests
+        working-directory: test
+        env:
+          TESTKIT_CI: '1'
+        run: python scripts/ci.py unit
+
+      - name: Report status back to test
+        if: always()
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          head=$(git -C test rev-parse HEAD)
+          if [ "${{ job.status }}" = "success" ]; then state="success"; else state="failure"; fi
+          echo "::add-mask::$GIE_GIT_TOKEN"
+          curl -fsS -X POST \
+            -H "Authorization: token ${GIE_GIT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/goodputai/test/statuses/$head" \
+            -d "{\"state\":\"$state\",\"context\":\"ci/public-worker/test-unit\",\"description\":\"public CI test unit $state\",\"target_url\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"}"
