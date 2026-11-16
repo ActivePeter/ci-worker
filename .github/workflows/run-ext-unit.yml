@@ -1,0 +1,126 @@
+name: run-ext-unit
+
+# Public CI for goodputai/goodput-infer-ext's "unit" job (the lightweight CPU
+# work: python unit/wiring/harness tests, cargo checks, maturin bindings).
+#
+# This is a faithful port of goodput-infer-ext/.github/workflows/ci.yml's
+# `unit` job, run on a free public GitHub-hosted runner instead of the private
+# repo's team-plan minutes. ext is checked out at runtime via GIE_GIT_TOKEN;
+# nothing private is committed to this public repo.
+#
+# Differences from the original (deliberate, for the prototype):
+#   - drops actions/cache (pip / .e2e-libs / .e2e-wheels), so first run is
+#     slower; caches can be re-added keyed identically if we keep this.
+#   - the two composite actions are inlined (gie-git-auth, cpu-engine-env).
+#   - adds a final step that reports the result back to ext as a commit status.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "ext branch / tag / SHA to run unit CI on"
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout ext (private) via token
+        uses: actions/checkout@v4
+        with:
+          repository: goodputai/goodput-infer-ext
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: ext
+          persist-credentials: false
+
+      - name: Use job-local Rust toolchains
+        run: echo "RUSTUP_HOME=$RUNNER_TEMP/gie-rustup" >> "$GITHUB_ENV"
+
+      - name: Resolve pins
+        id: pins
+        working-directory: ext
+        run: python3 e2e/harness/ci.py env --format github >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.pins.outputs.python }}
+
+      - name: Configure private-repo git auth (inlined gie-git-auth)
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          GIE_GIT_TOKEN=$(printf %s "$GIE_GIT_TOKEN" | tr -d '[:space:]')
+          if [ -z "$GIE_GIT_TOKEN" ]; then
+            echo '::error::GIE_GIT_TOKEN is not set on this repo'
+            exit 1
+          fi
+          echo "::add-mask::$GIE_GIT_TOKEN"
+          for r in sglang dynamo test goodput-infer-ext; do
+            git config --global \
+              "url.https://x-access-token:${GIE_GIT_TOKEN}@github.com/goodputai/${r}.insteadOf" \
+              "https://github.com/goodputai/${r}"
+          done
+          echo 'CARGO_NET_GIT_FETCH_WITH_CLI=true' >> "$GITHUB_ENV"
+
+      - name: Install shared crate prerequisites
+        working-directory: ext
+        run: python3 e2e/harness/ci.py apt --group unit
+
+      - name: Install pinned CPU engine environment (inlined cpu-engine-env)
+        working-directory: ext
+        env:
+          SGLANG: ${{ steps.pins.outputs.sglang_commit }}
+          DYNAMO: ${{ steps.pins.outputs.dynamo }}
+        run: bash e2e/harness/setup.sh --sglang-commit "$SGLANG" --dynamo "$DYNAMO"
+
+      - name: Python unit, wiring, harness, action and template tests
+        working-directory: ext
+        env:
+          E2E_TEMPLATE_SELFTEST: '1'
+        run: |
+          source .e2e-venv/env.sh
+          .e2e-venv/bin/python e2e/harness/ci.py python --packages PyYAML dockerfile-parse
+          .e2e-venv/bin/python e2e/harness/ci.py unit
+
+      - name: Install pinned Rust toolchain
+        working-directory: ext
+        env:
+          TOOLCHAIN: ${{ steps.pins.outputs.toolchain }}
+        run: |
+          rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustc,cargo,rust-std,rustfmt,clippy
+          rustc +"$TOOLCHAIN" --version
+          cargo +"$TOOLCHAIN" --version
+
+      - name: Check every Cargo workspace, independent crate and native case
+        working-directory: ext
+        run: python3 e2e/harness/ci.py cargo
+
+      - name: Build and test every maturin binding
+        working-directory: ext
+        run: |
+          source .e2e-venv/env.sh
+          export PATH="$PWD/.e2e-venv/bin:$PATH"
+          .e2e-venv/bin/python e2e/harness/ci.py python --packages maturin
+          .e2e-venv/bin/python e2e/harness/ci.py bindings
+
+      - name: Report status back to ext
+        if: always()
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          head=$(git -C ext rev-parse HEAD)
+          if [ "${{ job.status }}" = "success" ]; then state="success"; else state="failure"; fi
+          echo "::add-mask::$GIE_GIT_TOKEN"
+          curl -fsS -X POST \
+            -H "Authorization: token ${GIE_GIT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/goodputai/goodput-infer-ext/statuses/$head" \
+            -d "{\"state\":\"$state\",\"context\":\"ci/public-worker/unit\",\"description\":\"public CI unit $state\"}"
