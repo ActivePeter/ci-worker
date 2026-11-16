@@ -63,18 +63,24 @@ jobs:
             fi
             state=$(printf '%s' "$body" | jq -r --arg ctx "$CTX" \
               '[.statuses[]? | select(.context==$ctx)] | sort_by(.updated_at) | .[-1].state // empty')
-            case "$state" in
-              success) echo "skip $ref (already success)"; continue ;;
-              pending) echo "skip $ref (in-flight)"; continue ;;
-            esac
+            # Run-once-per-SHA semantics: only queue a ref that has never had a
+            # ci/public-worker/unit status. Any existing status (success/pending/
+            # failure) means we already ran it, so skip — this also avoids
+            # re-queuing a ref whose run deterministically fails every 5 minutes.
+            if [ -n "$state" ]; then
+              echo "skip $ref (latest=$state)"
+              continue
+            fi
 
-            echo "queue $ref (current=${state:-none})"
-            curl -fsS -X POST -H "$H1" -H "$H2" \
+            echo "queue $ref (no status yet)"
+            curl -sS -X POST -H "$H1" -H "$H2" \
               "$API/repos/$EXT/statuses/$ref" \
-              -d "{\"state\":\"pending\",\"context\":\"$CTX\",\"description\":\"queued by poll\"}"
+              -d "{\"state\":\"pending\",\"context\":\"$CTX\",\"description\":\"queued by poll\"}" >/dev/null \
+              || { echo "warn: pending-mark failed for $ref"; continue; }
             curl -fsS -X POST -H "$H1" -H "$H2" \
               "$API/repos/ActivePeter/ci-worker/dispatches" \
-              -d "{\"event_type\":\"run-ext-unit\",\"client_payload\":{\"ref\":\"$ref\",\"source\":\"poll\"}}"
+              -d "{\"event_type\":\"run-ext-unit\",\"client_payload\":{\"ref\":\"$ref\",\"source\":\"poll\"}}" \
+              || { echo "warn: dispatch failed for $ref"; continue; }
             dispatched=$((dispatched+1))
           done
           echo "::notice::poll dispatched=$dispatched"
