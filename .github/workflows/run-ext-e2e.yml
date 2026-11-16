@@ -82,11 +82,11 @@ jobs:
       - name: Require disk budget again after restoring caches
         working-directory: src
         run: python3 e2e/harness/ci.py disk --case "$E2E_CASE" --stage check
-      - uses: goodputai/goodput-infer-ext/.github/actions/cpu-engine-env@main
+      - name: Fail loudly on engine_env cases (cross-repo action not resolvable here)
         if: steps.pins.outputs.engine_env == 'true'
-        with:
-          sglang_commit: ${{ steps.pins.outputs.sglang_commit }}
-          dynamo: ${{ steps.pins.outputs.dynamo }}
+        run: |
+          echo "::error::case $E2E_CASE requires cpu-engine-env from goodputai/goodput-infer-ext, which cannot be resolved in ci-worker. Handle this case in the ext repo CI."
+          exit 1
       - name: Install declared Rust toolchain
         if: steps.pins.outputs.rust == 'true'
         env:
