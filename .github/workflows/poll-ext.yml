@@ -1,12 +1,8 @@
 name: poll-ext
 
-# Solution A: the public worker polls goodputai/goodput-infer-ext for work, so
-# ext does NOT need any of its own (billing-blocked) GitHub-hosted runners to
-# kick the public CI. Every 5 minutes this enumerates ext's open PR head SHAs
-# (non-fork only) plus main's HEAD, and for each ref whose latest
-# `ci/public-worker/unit` status is neither `success` nor `pending`, it queues a
-# `run-ext-unit` run on this public repo. The status is marked `pending` here
-# before dispatch so a later poll does not double-queue the same ref.
+# Every 5 minutes: queue run-ext-unit for each open non-fork PR head and each
+# protected-branch head of goodputai/goodput-infer-ext that has no ci/public-worker/unit status yet
+# (logic in ci/poll.sh; protected branches come from GitHub, not from here).
 
 on:
   schedule:
@@ -14,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "only poll this specific ref (empty = all open PRs + main)"
+        description: "only poll this ref (empty = open PR heads + protected branches)"
         required: false
         default: ""
 
@@ -26,61 +22,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Queue public unit CI for ext refs that need it
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: ci
+      - name: Queue public unit CI for goodputai/goodput-infer-ext refs that need it
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
-        run: |
-          set -euo pipefail
-          TOKEN="$(printf %s "$GIE_GIT_TOKEN" | tr -d '[:space:]')"
-          [ -n "$TOKEN" ] || { echo '::error::GIE_GIT_TOKEN empty'; exit 1; }
-          echo "::add-mask::$TOKEN"
-          API="https://api.github.com"
-          H1="Authorization: token ${TOKEN}"
-          H2="Accept: application/vnd.github+json"
-          EXT="goodputai/goodput-infer-ext"
-          CTX="ci/public-worker/unit"
-
-          only="${{ github.event.inputs.ref }}"
-          if [ -n "$only" ]; then
-            refs="$only"
-          else
-            prs=$(curl -fsS -H "$H1" -H "$H2" "$API/repos/$EXT/pulls?state=open&per_page=100")
-            main=$(curl -fsS -H "$H1" -H "$H2" "$API/repos/$EXT/commits/main")
-            refs=$(printf '%s\n%s\n' \
-              "$(printf '%s' "$prs" | jq -r '.[] | select(.head.repo.full_name=="goodputai/goodput-infer-ext") | .head.sha')" \
-              "$(printf '%s' "$main" | jq -r '.sha')" \
-              | sort -u | grep -v '^$')
-          fi
-
-          dispatched=0
-          for ref in $refs; do
-            resp=$(curl -sS -w $'\n%{http_code}' -H "$H1" -H "$H2" "$API/repos/$EXT/commits/$ref/status")
-            code=$(printf '%s' "$resp" | tail -n 1)
-            body=$(printf '%s' "$resp" | sed '$d')
-            if [ "$code" != "200" ]; then
-              echo "skip $ref (status fetch HTTP $code)"
-              continue
-            fi
-            state=$(printf '%s' "$body" | jq -r --arg ctx "$CTX" \
-              '[.statuses[]? | select(.context==$ctx)] | sort_by(.updated_at) | .[-1].state // empty')
-            # Run-once-per-SHA semantics: only queue a ref that has never had a
-            # ci/public-worker/unit status. Any existing status (success/pending/
-            # failure) means we already ran it, so skip — this also avoids
-            # re-queuing a ref whose run deterministically fails every 5 minutes.
-            if [ -n "$state" ]; then
-              echo "skip $ref (latest=$state)"
-              continue
-            fi
-
-            echo "queue $ref (no status yet)"
-            curl -sS -X POST -H "$H1" -H "$H2" \
-              "$API/repos/$EXT/statuses/$ref" \
-              -d "{\"state\":\"pending\",\"context\":\"$CTX\",\"description\":\"queued by poll\"}" >/dev/null \
-              || { echo "warn: pending-mark failed for $ref"; continue; }
-            curl -fsS -X POST -H "$H1" -H "$H2" \
-              "$API/repos/ActivePeter/ci-worker/dispatches" \
-              -d "{\"event_type\":\"run-ext-unit\",\"client_payload\":{\"ref\":\"$ref\",\"source\":\"poll\"}}" \
-              || { echo "warn: dispatch failed for $ref"; continue; }
-            dispatched=$((dispatched+1))
-          done
-          echo "::notice::poll dispatched=$dispatched"
+        run: bash ci/poll.sh goodputai/goodput-infer-ext ci/public-worker/unit run-ext-unit "${{ github.event.inputs.ref }}"
