@@ -1,0 +1,122 @@
+name: run-dynamo-unit
+
+# Public CI for goodputai/dynamo's lightweight CPU work: the KVBM shared-host
+# lifecycle unit tests. This is a port of the pure-CPU `lifecycle` job in
+# dynamo's .github/workflows/kvbm-shared-pool-lifecycle.yml (rcommu-lite +
+# kvbm-host cargo tests, maturin build, pytest), run on a free public
+# GitHub-hosted runner instead of dynamo's GitHub-hosted team minutes.
+# dynamo is checked out at runtime via GIE_GIT_TOKEN; nothing private is
+# committed to this public repo.
+#
+# Deliberately NOT ported:
+#   - confirm-debug (continue-on-error diagnostic, not gating)
+#   - pre-merge.yml rust-tests / rust-clippy (gated to upstream ai-dynamo/dynamo)
+#   - dynamo-pipeline.yml rust-gpu / mypy (self-hosted GPU fleet)
+#   - nightly-ci.yml rust-tests (self-hosted Fastchecker coverage)
+#
+# No gie-git-auth insteadOf needed here: dynamo's Cargo.lock git deps are only
+# public (ai-dynamo/aiconfigurator, vllm-project/vllm).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "dynamo branch / tag / SHA to run unit CI on"
+        required: false
+        default: "main"
+  repository_dispatch:
+    types: [run-dynamo-unit]
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+    steps:
+      - name: Resolve ref (workflow_dispatch or repository_dispatch)
+        id: ref
+        run: |
+          ref="${{ github.event.inputs.ref }}"
+          if [ -z "$ref" ]; then ref="${{ github.event.client_payload.ref }}"; fi
+          echo "ref=${ref:-main}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout dynamo (private) via token
+        uses: actions/checkout@v4
+        with:
+          repository: goodputai/dynamo
+          ref: ${{ steps.ref.outputs.ref }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: dynamo
+          persist-credentials: false
+
+      - name: Mark pending status on dynamo
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          head=$(git -C dynamo rev-parse HEAD)
+          curl -fsS -X POST \
+            -H "Authorization: token ${GIE_GIT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/goodputai/dynamo/statuses/$head" \
+            -d '{"state":"pending","context":"ci/public-worker/dynamo-unit","description":"public CI dynamo unit running"}'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y libclang-dev
+          rustup toolchain install 1.96.1 --profile minimal
+          # dynamo's rust-toolchain.toml (channel 1.96.1) selects the toolchain
+          # when cargo runs; the install above just warms the cache.
+
+      - name: Test node-local RPC transport
+        working-directory: dynamo
+        run: cargo test --locked -p rcommu-lite
+
+      - name: Test shared Host control, multiprocess lifetime and reuse
+        working-directory: dynamo
+        run: |
+          cargo test --locked -p kvbm-host --lib -- --test-threads=1
+          cargo test --locked --release -p kvbm-host --test confirm_ipc -- --test-threads=1
+          cargo test --locked -p kvbm-host --doc
+          cargo test --locked --release -p kvbm-host --test multiprocess -- --test-threads=1
+
+      - name: Build standalone Python binding
+        working-directory: dynamo
+        run: |
+          python3 -m pip install 'maturin>=1.8,<2'
+          python3 -m maturin build --locked \
+            --manifest-path lib/kvbm-host/Cargo.toml --out /tmp/hicache-wheels
+          python3 -m pip install --no-deps /tmp/hicache-wheels/dynamo_hicache-*.whl
+          python3 -m dynamo_hicache config
+          python3 -c 'from dynamo_hicache import _native; assert len(_native.page_key(list(range(16)))) == 16'
+
+      - name: Test standalone sharing and NUMA configuration
+        working-directory: dynamo
+        run: |
+          python3 -m pip install pytest pytest-timeout
+          python3 -m pytest -v \
+            lib/kvbm-host/tests/test_sharing.py \
+            lib/kvbm-host/tests/test_numa.py
+
+      - name: Report status back to dynamo
+        if: always()
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          head=$(git -C dynamo rev-parse HEAD)
+          if [ "${{ job.status }}" = "success" ]; then state="success"; else state="failure"; fi
+          echo "::add-mask::$GIE_GIT_TOKEN"
+          curl -fsS -X POST \
+            -H "Authorization: token ${GIE_GIT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/goodputai/dynamo/statuses/$head" \
+            -d "{\"state\":\"$state\",\"context\":\"ci/public-worker/dynamo-unit\",\"description\":\"public CI dynamo unit $state\",\"target_url\":\"$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\"}"
