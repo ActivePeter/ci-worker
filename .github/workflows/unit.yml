@@ -1,0 +1,212 @@
+name: unit
+
+# Reusable job DAG behind run-*-unit:
+#   prepare (checkout, resolve SHA, ask the entry script for its plan, pending)
+#     -> run[matrix: one job per planned id, all in parallel]
+#     -> report (needs everything; the only writer of the final status).
+#
+# Entry script contract (.github/ci/public-unit.sh in the tested SHA; falls back
+# to ci-worker's ci/defaults/<repo>.sh, reported as "legacy default"):
+#   plan        stdout JSON {"version":1,"jobs":[{"id","timeout","python",
+#               "rust_cache","fetch_depth"}...],"report":bool}; no side effects
+#   setup <id>  optional deps; may append to $GITHUB_ENV / $GITHUB_PATH
+#   run <id>    exit 0 = green; extra outputs go to $CI_OUT (uploaded)
+#   report      only if plan.report: every job's $CI_OUT is in $CI_IN/job-<id>/
+# All commands run from the tested repo root with github.com/goodputai/* git
+# access configured (ci/git-auth.sh) and CARGO_NET_GIT_FETCH_WITH_CLI=true.
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        type: string
+        required: true
+      context:
+        type: string
+        required: true
+      default_entry:
+        type: string
+        required: true
+      ref:
+        type: string
+        required: true
+    secrets:
+      GIE_GIT_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      kind: ${{ steps.plan.outputs.kind }}
+      jobs: ${{ steps.plan.outputs.jobs }}
+      report: ${{ steps.plan.outputs.report }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ciw
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: src
+          persist-credentials: false
+      - name: Configure goodputai git access
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: bash ciw/ci/git-auth.sh
+      - name: Plan jobs and mark pending
+        id: plan
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+          REPO: ${{ inputs.repo }}
+          CONTEXT: ${{ inputs.context }}
+          DEFAULT_ENTRY: ${{ inputs.default_entry }}
+          SRC: src
+          CIW: ciw
+        run: python3 ciw/ci/plan.py
+
+  run:
+    needs: prepare
+    name: ${{ matrix.id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.jobs) }}
+    env:
+      CI_JOB: ${{ matrix.id }}
+      CI_OUT: ${{ github.workspace }}/.ci-out
+      CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ciw
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: src
+          persist-credentials: false
+          fetch-depth: ${{ matrix.fetch_depth }}
+      - name: Configure goodputai git access
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          bash ciw/ci/git-auth.sh
+          mkdir -p "$CI_OUT"
+          if [ '${{ needs.prepare.outputs.kind }}' = target ]; then
+            echo "ENTRY=$GITHUB_WORKSPACE/src/.github/ci/public-unit.sh" >> "$GITHUB_ENV"
+          else
+            echo "ENTRY=$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}" >> "$GITHUB_ENV"
+          fi
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: false
+      - uses: actions/setup-python@v5
+        if: matrix.python != ''
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Select Rust toolchain
+        if: matrix.rust_cache
+        working-directory: src
+        run: rustup show active-toolchain || rustup show
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.rust_cache
+        with:
+          workspaces: src
+          prefix-key: v1-${{ inputs.repo }}
+          shared-key: ${{ matrix.id }}
+          cache-on-failure: true
+      - name: setup ${{ matrix.id }}
+        working-directory: src
+        run: bash "$ENTRY" setup "$CI_JOB"
+      - name: run ${{ matrix.id }}
+        working-directory: src
+        run: bash "$ENTRY" run "$CI_JOB"
+      - name: Record job result
+        if: always()
+        run: echo '${{ job.status }}' > "$CI_OUT/.ci-job-status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: job-${{ matrix.id }}
+          path: ${{ env.CI_OUT }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  report:
+    needs: [prepare, run]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CI_IN: ${{ github.workspace }}/.ci-in
+      CI_OUT: ${{ github.workspace }}/.ci-out
+      CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ciw
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        if: needs.prepare.result == 'success'
+        with:
+          pattern: job-*
+          path: ${{ env.CI_IN }}
+      - uses: actions/checkout@v4
+        if: needs.prepare.outputs.report == 'true'
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: src
+          persist-credentials: false
+      - name: Entry report (cross-job audit)
+        id: entry
+        if: needs.prepare.outputs.report == 'true'
+        working-directory: src
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          bash "$GITHUB_WORKSPACE/ciw/ci/git-auth.sh"
+          mkdir -p "$CI_OUT"
+          if [ '${{ needs.prepare.outputs.kind }}' = target ]; then
+            entry="$GITHUB_WORKSPACE/src/.github/ci/public-unit.sh"
+          else
+            entry="$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}"
+          fi
+          set +e
+          bash "$entry" report
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+      - name: Upload report outputs
+        if: needs.prepare.outputs.report == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: ${{ env.CI_OUT }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Final status (only writer)
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+          REPO: ${{ inputs.repo }}
+          CONTEXT: ${{ inputs.context }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          KIND: ${{ needs.prepare.outputs.kind }}
+          JOBS: ${{ needs.prepare.outputs.jobs }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          REPORT_RC: ${{ steps.entry.outputs.rc }}
+        run: python3 ciw/ci/report.py
