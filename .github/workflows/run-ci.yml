@@ -1,0 +1,97 @@
+name: run-ci-for-private-repo
+
+# Public CI worker: runs a CI command against a goodputai *private* repo.
+#
+# Private code is NEVER committed to this (public) repo. It is cloned at
+# runtime using the repo secret `GIE_GIT_TOKEN` (the user's read-capable token),
+# so only the workflow YAML + README are public.
+#
+# Trigger:
+#   - workflow_dispatch: manual, from the Actions tab.
+#   - repository_dispatch[run-ci]: a private repo POSTs to
+#       https://api.github.com/repos/goodputai/ci-worker/dispatches
+#     with a token, body:
+#       {"event_type":"run-ci","client_payload":{"target_repo":"goodputai/dynamo","ref":"main","run":"git rev-parse HEAD"}}
+#
+# Do NOT add pull_request_target here: that would expose GIE_GIT_TOKEN to forks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: "owner/repo of the private repo to run CI for"
+        required: true
+        default: "goodputai/dynamo"
+      ref:
+        description: "branch / tag / SHA to check out"
+        required: false
+        default: "main"
+      run:
+        description: "shell command to run inside the cloned repo"
+        required: false
+        default: "git rev-parse HEAD"
+  repository_dispatch:
+    types: [run-ci]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve inputs (manual or repository_dispatch)
+        id: args
+        env:
+          INPUT_REPO: ${{ github.event.inputs.target_repo }}
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          INPUT_RUN: ${{ github.event.inputs.run }}
+          PAYLOAD_REPO: ${{ github.event.client_payload.target_repo }}
+          PAYLOAD_REF: ${{ github.event.client_payload.ref }}
+          PAYLOAD_RUN: ${{ github.event.client_payload.run }}
+        run: |
+          repo="${INPUT_REPO:-${PAYLOAD_REPO:-goodputai/dynamo}}"
+          ref="${INPUT_REF:-${PAYLOAD_REF:-main}}"
+          run="${INPUT_RUN:-${PAYLOAD_RUN:-git rev-parse HEAD}}"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "::notice::target=$repo ref=$ref"
+
+      - name: Clone private repo
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${{ steps.args.outputs.repo }}"
+          ref="${{ steps.args.outputs.ref }}"
+          if [ -z "${GIE_GIT_TOKEN:-}" ]; then
+            echo "::error::GIE_GIT_TOKEN secret is not set on this repo"
+            exit 1
+          fi
+          echo "::add-mask::$GIE_GIT_TOKEN"
+          # Rewrite https git URLs so the token authenticates without persisting
+          # on disk. Only applies to this job's git process, never logged.
+          git config --global url."https://x-access-token:${GIE_GIT_TOKEN}@github.com/".insteadOf "https://github.com/"
+          git clone --depth 1 --branch "$ref" "https://github.com/$repo" src
+          echo "HEAD=$(git -C src rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Run CI command
+        working-directory: src
+        run: ${{ steps.args.outputs.run }}
+
+      - name: Report status back to private repo
+        if: always()
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          head="${HEAD:-}"
+          [ -n "$head" ] || { echo "::warning::no HEAD recorded; skipping status"; exit 0; }
+          if [ "${{ job.status }}" = "success" ]; then state="success"; else state="failure"; fi
+          echo "::add-mask::$GIE_GIT_TOKEN"
+          curl -fsS -X POST \
+            -H "Authorization: token ${GIE_GIT_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ steps.args.outputs.repo }}/statuses/$head" \
+            -d "{\"state\":\"$state\",\"context\":\"ci/public-worker\",\"description\":\"public CI $state\"}"
