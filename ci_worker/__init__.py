@@ -1,14 +1,15 @@
-"""ci_worker — 简易的公开仓库替私有仓库跑 CI 的参考实现。
+"""ci_worker — 一个简易的通用 CI worker（调度器 + 多节点 worker）。
 
-这是把本仓库里那套 GitHub Actions workflow（poll-*.yml + run-*-unit.yml）用
-Python 重新表达的一版，作为设计参考/文档，不要求真跑通。三块职责一一对应：
+纯标准库实现（http.server / urllib / threading / subprocess），无第三方依赖。
+三块职责：
 
-  poller  ~ poll-*.yml        轮询私有仓库的 open PR + main，派发工作
-  worker  ~ run-*-unit.yml    拉私有代码、跑一个 unit job、回写 commit status
-  github  ~ 裸 REST + statuses 的最小封装（只用标准库 urllib，无第三方依赖）
+  scheduler   调度器：HTTP 服务 + 任务队列 + worker 注册表
+  worker      执行节点：动态注册、心跳、拉任务、执行、回传结果
+  client      提交/查询任务的 HTTP 客户端
 
-私有代码绝不进入本公开仓库；运行时用 GIE_GIT_TOKEN（用户 gh 令牌）在 worker
-里以 git insteadOf 方式 clone，跑完把 status 回写到私有仓库。
+任务通过 HTTP 接口提交；worker 动态注册并周期心跳，调度器把队列里的任务派给
+空闲 worker。与私有仓库、GitHub 均无耦合，是纯通用的「提交命令 → 分发执行 → 收集
+结果」框架。
 """
 
-__all__ = ["github", "targets", "poller", "worker"]
+__all__ = ["task", "scheduler", "worker", "client"]
