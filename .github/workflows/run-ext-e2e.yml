@@ -1,0 +1,123 @@
+name: run-ext-e2e
+
+# Public e2e gate entry for goodputai/goodput-infer-ext: run one declared case
+# (e2e/harness/ci.py run --case <case>) against a chosen ref, with an optional
+# mutation input passed through as E2E_MUTATION for negative controls.
+# Status writeback uses its own context ci/public-worker/e2e-<case>, so it never
+# overwrites ci/public-worker/unit. Single job (not unit.yml's matrix): a case is
+# one process boundary by design (e2e/harness/ci.py run is the entry the ext
+# repo's own ci.yml e2e job uses).
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "branch / tag / full SHA of goodputai/goodput-infer-ext to run the case on"
+        required: true
+      case:
+        description: "case directory under e2e/cases (e.g. artifact_runtime_contract, python_startup_contract)"
+        required: true
+      mutation:
+        description: "optional negative-control value, passed unchanged as E2E_MUTATION (empty = normal run)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run-ext-e2e-${{ github.event.inputs.case }}-${{ github.event.inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      E2E_CASE: ${{ github.event.inputs.case }}
+      E2E_MUTATION: ${{ github.event.inputs.mutation }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ciw
+          persist-credentials: false
+      - name: Checkout goodputai/goodput-infer-ext at the requested ref
+        uses: actions/checkout@v4
+        with:
+          repository: goodputai/goodput-infer-ext
+          ref: ${{ github.event.inputs.ref }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: src
+          persist-credentials: false
+      - name: Configure goodputai git access
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: bash ciw/ci/git-auth.sh
+      - name: Resolve tested SHA and mark pending
+        id: sha
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          sha=$(git -C src rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          python3 ciw/ci/status.py goodputai/goodput-infer-ext "$sha" pending             "ci/public-worker/e2e-$E2E_CASE" "running case $E2E_CASE${E2E_MUTATION:+ (mutation: $E2E_MUTATION)}"
+      - name: Use job-local Rust toolchains
+        run: echo "RUSTUP_HOME=$RUNNER_TEMP/gie-rustup" >> "$GITHUB_ENV"
+      - id: pins
+        name: Read pinned case configuration
+        working-directory: src
+        run: python3 e2e/harness/ci.py env --case "$E2E_CASE" --format github >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.pins.outputs.python }}
+      - name: Prepare hosted disk and select case storage
+        id: disk
+        working-directory: src
+        run: python3 e2e/harness/ci.py disk --case "$E2E_CASE" --stage prepare
+      - uses: actions/cache@v4
+        if: steps.pins.outputs.cache_paths != ''
+        with:
+          path: ${{ steps.disk.outputs.resolved_paths }}
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.cache_key }}
+      - name: Require disk budget again after restoring caches
+        working-directory: src
+        run: python3 e2e/harness/ci.py disk --case "$E2E_CASE" --stage check
+      - uses: goodputai/goodput-infer-ext/.github/actions/cpu-engine-env@main
+        if: steps.pins.outputs.engine_env == 'true'
+        with:
+          sglang_commit: ${{ steps.pins.outputs.sglang_commit }}
+          dynamo: ${{ steps.pins.outputs.dynamo }}
+      - name: Install declared Rust toolchain
+        if: steps.pins.outputs.rust == 'true'
+        env:
+          TOOLCHAIN: ${{ steps.pins.outputs.toolchain }}
+        run: rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustc,cargo,rust-std,rustfmt,clippy
+      - name: Install declared native prerequisites
+        working-directory: src
+        run: python3 e2e/harness/ci.py apt --group case --case "$E2E_CASE"
+      - name: Run declared setup, then the case
+        working-directory: src
+        run: python3 e2e/harness/ci.py run --case "$E2E_CASE" --output "artifacts/$E2E_CASE"
+      - name: Publish case table
+        if: always()
+        working-directory: src
+        run: |
+          if [ -f "artifacts/$E2E_CASE/table.md" ]; then
+            cat "artifacts/$E2E_CASE/table.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: src/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Final status
+        if: always()
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          if [ "${{ job.status }}" = "success" ]; then state=success; else state=failure; fi
+          python3 ciw/ci/status.py goodputai/goodput-infer-ext "$SHA" "$state" \
+            "ci/public-worker/e2e-$E2E_CASE" "case $E2E_CASE ${E2E_MUTATION:+(mutation: $E2E_MUTATION) }$state"
