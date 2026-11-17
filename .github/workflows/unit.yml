@@ -123,6 +123,7 @@ jobs:
       - uses: actions/setup-go@v5
         if: matrix.go
         with:
+          go-version: ${{ matrix.go_version }}
           go-version-file: src/go.mod
           cache-dependency-path: src/go.sum
       - uses: actions/setup-node@v4

@@ -14,6 +14,7 @@ class DagPanelPlanTests(unittest.TestCase):
     def entry_plan(self, ui1):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            (root / 'go.mod').write_text('module example\n\ngo 1.25.0\n\ntoolchain go1.26.0\n')
             (root / 'collab').mkdir()
             (root / 'collab/.nvmrc').write_text('20.20.2\n')
             (root / 'web').mkdir()
@@ -29,6 +30,7 @@ class DagPanelPlanTests(unittest.TestCase):
                          ['lint', 'unit', 'smoke', 'regression', 'performance', 'collector'])
         self.assertFalse(report)
         self.assertTrue(all(j['go'] and j['python'] == '3.12' for j in jobs))
+        self.assertTrue(all(j['go_version'] == '1.26.0' for j in jobs))
         self.assertTrue(all(j['node'] == '20.20.2' and j['pnpm'] == '10.15.1' for j in jobs))
         self.assertEqual(jobs[0]['fetch_depth'], 0)
 
@@ -41,6 +43,7 @@ class DagPanelPlanTests(unittest.TestCase):
         jobs, _ = plan.normalize({'version': 1, 'jobs': [{'id': 'existing', 'rust_cache': True}]})
         self.assertTrue(jobs[0]['rust_cache'])
         self.assertFalse(jobs[0]['go'])
+        self.assertEqual(jobs[0]['go_version'], '')
         self.assertEqual(jobs[0]['node'], '')
         self.assertEqual(jobs[0]['pnpm'], '')
 

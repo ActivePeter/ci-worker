@@ -5,16 +5,19 @@ phase="${1:-}"
 case "$phase" in
   plan)
     /usr/bin/python3 -I - <<'PLAN'
-import json
+import json, re
 from pathlib import Path
+go = re.search(r'^toolchain\s+go(\S+)\s*$', Path('go.mod').read_text(), re.M)
+if not go:
+    raise ValueError('dag-panel go.mod must declare a toolchain')
 node = Path('collab/.nvmrc').read_text().strip().removeprefix('v')
 pnpm = json.loads(Path('web/package.json').read_text())['packageManager'].split('@', 1)[1]
-jobs = [dict(id=name, timeout=30, python='3.12', go=True, node=node, pnpm=pnpm,
+jobs = [dict(id=name, timeout=30, python='3.12', go=True, go_version=go.group(1), node=node, pnpm=pnpm,
              fetch_depth=0 if name == 'lint' else 1)
         for name in ['lint', 'unit', 'smoke', 'regression', 'performance', 'collector']]
 # Old PR heads predate UI1. The frozen legacy default still runs all six checks.
 if Path('testflows/machine-range-preview.cjs').is_file():
-    jobs.append(dict(id='machine-ui1', timeout=30, python='3.12', go=True, node=node, pnpm=pnpm))
+    jobs.append(dict(id='machine-ui1', timeout=30, python='3.12', go=True, go_version=go.group(1), node=node, pnpm=pnpm))
 print(json.dumps(dict(version=1, jobs=jobs, report=False)))
 PLAN
     ;;
