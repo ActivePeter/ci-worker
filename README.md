@@ -95,3 +95,17 @@ Dynamo/ext及已有store、自托管runner继续原流程。
 
 保存时记录bootstrap的canonical store/bin/nix路径及二进制SHA256；恢复时核对路径、hash
 和同目录nix-store可执行性，因此HOME下XDG用户profile未被缓存也能运行。v2缓存键隔离早期profile恢复未命中的试跑。
+
+
+## Optional shared build inputs
+
+A target plan may declare one `shared: {id, timeout, fetch_depth}` preparation
+stage in addition to its existing matrix jobs. Only matrix jobs declaring
+`shared: true` download that stage's single `shared-inputs` artifact. The target
+owns the content and verification: `setup <shared id>` can emit a `cache_key`
+through `GITHUB_OUTPUT`, and `run <shared id>` prepares/validates `CI_SHARED`.
+The worker uses the standard GitHub cache for that exact repository-scoped key,
+then uploads one snapshot before starting the matrix. The target imports it
+in its own setup; the worker never replaces an existing `/nix` store. Missing
+snapshots, preparation failures and artifact failures remain red in the final
+report. Plans without `shared` retain their existing entry behavior.

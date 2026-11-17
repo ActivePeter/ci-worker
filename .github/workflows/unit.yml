@@ -54,6 +54,8 @@ jobs:
       sha: ${{ steps.plan.outputs.sha }}
       kind: ${{ steps.plan.outputs.kind }}
       jobs: ${{ steps.plan.outputs.jobs }}
+      shared: ${{ steps.plan.outputs.shared }}
+      report_jobs: ${{ steps.plan.outputs.report_jobs }}
       report: ${{ steps.plan.outputs.report }}
     steps:
       - uses: actions/checkout@v4
@@ -83,8 +85,92 @@ jobs:
           TEST_UNIT_SETUP: ${{ inputs.test_setup }}
         run: /usr/bin/python3 -I ciw/ci/plan.py
 
-  run:
+
+  shared:
     needs: prepare
+    if: needs.prepare.outputs.shared != ''
+    name: ${{ fromJSON(needs.prepare.outputs.shared || '{}').id || 'shared' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ fromJSON(needs.prepare.outputs.shared || '{}').timeout || 60 }}
+    env:
+      TEST_UNIT_SETUP: ${{ inputs.test_setup }}
+      TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
+      CI_ENTRY_KIND: ${{ needs.prepare.outputs.kind }}
+      CI_JOB: ${{ fromJSON(needs.prepare.outputs.shared || '{}').id }}
+      CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
+      CI_OUT: ${{ github.workspace }}/.ci-out
+      CI_SHARED: ${{ github.workspace }}/.ci-shared
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ciw
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ needs.prepare.outputs.sha }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: src
+          persist-credentials: false
+          fetch-depth: ${{ fromJSON(needs.prepare.outputs.shared).fetch_depth }}
+      - name: Configure goodputai git access
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          bash ciw/ci/git-auth.sh
+          mkdir -p "$CI_OUT" "$CI_SHARED"
+          if [ '${{ needs.prepare.outputs.kind }}' = target ]; then
+            echo "ENTRY=$GITHUB_WORKSPACE/src/.github/ci/public-unit.sh" >> "$GITHUB_ENV"
+          else
+            echo "ENTRY=$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}" >> "$GITHUB_ENV"
+          fi
+      - name: Restore verified Nix bootstrap cache
+        if: inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache
+        uses: ./ciw/.github/actions/nix-cache-restore
+      - name: setup shared inputs
+        id: setup
+        working-directory: src
+        run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
+      - name: Restore target-owned shared inputs
+        id: cache
+        if: steps.setup.outputs.cache_key != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CI_SHARED }}
+          key: ciw-shared-v1-${{ inputs.repo }}-${{ steps.setup.outputs.cache_key }}
+      - name: Prepare and verify shared inputs
+        working-directory: src
+        run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
+      - name: Save target-owned shared inputs
+        if: steps.setup.outputs.cache_key != '' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CI_SHARED }}
+          key: ciw-shared-v1-${{ inputs.repo }}-${{ steps.setup.outputs.cache_key }}
+      - name: Publish one shared snapshot for all consumers
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-inputs
+          path: ${{ env.CI_SHARED }}
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+      - name: Record shared job result
+        if: always()
+        run: echo '${{ job.status }}' > "$CI_OUT/.ci-job-status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: job-${{ env.CI_JOB }}
+          path: ${{ env.CI_OUT }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  run:
+    needs: [prepare, shared]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && (needs.shared.result == 'success' || needs.shared.result == 'skipped') }}
     name: ${{ matrix.id }}
     runs-on: ubuntu-24.04
     # Existing test revisions request 60m; Rust cold builds include the signature control.
@@ -100,6 +186,7 @@ jobs:
       CI_JOB: ${{ matrix.id }}
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
+      CI_SHARED: ${{ github.workspace }}/.ci-shared
     steps:
       - uses: actions/checkout@v4
         with:
@@ -160,6 +247,12 @@ jobs:
       - name: Restore verified Nix cache
         if: inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache
         uses: ./ciw/.github/actions/nix-cache-restore
+      - name: Download shared inputs
+        if: matrix.shared
+        uses: actions/download-artifact@v4
+        with:
+          name: shared-inputs
+          path: ${{ env.CI_SHARED }}
       - name: setup ${{ matrix.id }}
         working-directory: src
         run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
@@ -182,7 +275,7 @@ jobs:
           retention-days: 7
 
   report:
-    needs: [prepare, run]
+    needs: [prepare, shared, run]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -193,6 +286,7 @@ jobs:
       CI_IN: ${{ github.workspace }}/.ci-in
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
+      CI_SHARED: ${{ github.workspace }}/.ci-shared
     steps:
       - uses: actions/checkout@v4
         with:
@@ -248,7 +342,7 @@ jobs:
           CONTEXT: ${{ inputs.context }}
           SHA: ${{ needs.prepare.outputs.sha }}
           KIND: ${{ needs.prepare.outputs.kind }}
-          JOBS: ${{ needs.prepare.outputs.jobs }}
+          JOBS: ${{ needs.prepare.outputs.report_jobs }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
           RUN_RESULT: ${{ needs.run.result }}
           REPORT_JOB_RESULT: ${{ job.status }}
