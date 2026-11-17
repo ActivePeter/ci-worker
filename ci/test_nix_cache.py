@@ -46,12 +46,21 @@ class CachePolicy(unittest.TestCase):
             key = nix_cache.store_key(Path('.'), 'closure-fingerprint')
         self.assertEqual(key, 'testkit-nix-store-v1-Linux-X64-lock-hash-closure-fingerprint')
 
+    def test_main_history_accepts_merged_sha_and_rejects_pr_or_missing_ref(self):
+        from types import SimpleNamespace
+        environment = dict(GITHUB_REF='refs/heads/main', GITHUB_EVENT_NAME='workflow_dispatch',
+                           CI_JOB='static', CI_REF_SHA='pinned-main-history-sha')
+        for rc, expected in ((0, True), (1, False), (128, False)):
+            with patch.dict(os.environ, environment), patch.object(nix_cache.subprocess, 'run', return_value=SimpleNamespace(returncode=rc)) as run:
+                self.assertEqual(nix_cache.writer_allowed(Path('.')), expected)
+                self.assertEqual(run.call_args.args[0], ['git', 'merge-base', '--is-ancestor', 'pinned-main-history-sha', 'refs/remotes/origin/main'])
+
     def test_default_main_cannot_save_a_pr_sha(self):
         from types import SimpleNamespace
         with patch.object(nix_cache.subprocess, 'run', return_value=SimpleNamespace(returncode=1)):
             result = self.call(nix_cache.freeze, GITHUB_REF='refs/heads/main', GITHUB_EVENT_NAME='workflow_dispatch', CI_JOB='static', CI_REF_SHA='pr-sha')
         self.assertEqual(result['save'], 'false')
-        self.assertIn('not target main', result['reason'])
+        self.assertIn('target main history', result['reason'])
 
 
 if __name__ == '__main__':

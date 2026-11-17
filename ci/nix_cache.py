@@ -140,26 +140,27 @@ def check(src, meta, *, store=None):
     return record
 
 
-def freeze(src, meta):
-    # Defence in depth: the workflow ref AND the tested commit must be default
-    # main. Dispatching a PR SHA from ci-worker main must never enable writes.
+def writer_allowed(src):
     if (os.environ.get('GITHUB_REF') != 'refs/heads/main'
             or os.environ.get('GITHUB_EVENT_NAME') == 'pull_request'
             or os.environ.get('CI_JOB') != 'static'):
-        emit(save='false', reason='reader only')
-        return
+        return False
+    # static has fetch-depth: 0. A later merge must not invalidate a pinned
+    # main-SHA benchmark, while an unmerged PR SHA must remain read-only.
+    ancestry = subprocess.run(['git', 'merge-base', '--is-ancestor', os.environ['CI_REF_SHA'],
+                              'refs/remotes/origin/main'], cwd=src,
+                             text=True, capture_output=True, timeout=30)
+    return ancestry.returncode == 0
+
+
+def freeze(src, meta):
     if os.environ.get('TESTKIT_NIX_CACHE_STATE') == 'hit':
         emit(save='false', reason='verified shared cache already exists')
         return
-    main = os.environ['CI_REF_SHA']
-    # static has fetch-depth: 0. Trust the default-branch history fetched by
-    # checkout, so a later merge cannot invalidate a pinned main-SHA benchmark.
-    ancestry = subprocess.run(['git', 'merge-base', '--is-ancestor', main,
-                              'refs/remotes/origin/main'], cwd=src,
-                             text=True, capture_output=True, timeout=30)
-    if ancestry.returncode != 0:
-        emit(save='false', reason='tested SHA is not target main history')
+    if not writer_allowed(src):
+        emit(save='false', reason='reader only; tested SHA must belong to target main history')
         return
+    main = os.environ['CI_REF_SHA']
     closure = module(src, 'nix_closure')
     nix = bind_nix(closure)
     profile = meta / 'environment'
