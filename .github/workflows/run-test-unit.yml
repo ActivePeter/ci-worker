@@ -27,6 +27,7 @@ jobs:
     with:
       repo: goodputai/test
       context: ci/public-worker/test-unit
+      runtime: nix
       default_entry: ci/defaults/test.sh
       ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
     secrets:

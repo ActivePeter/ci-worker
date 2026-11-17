@@ -17,7 +17,13 @@ print(json.dumps({"version": 1, "jobs": jobs, "report": True}))
 PY
     ;;
   setup)
-    python3 testkit env prepare --uv uv --cache-config config/cache-ephemeral.json --export-github
+    if [ "${CI_RUNTIME:-legacy}" = nix ]; then
+      python -I -c 'import sys; assert sys.executable.startswith("/nix/store/"), sys.executable; print(sys.executable)'
+      python -I scripts/python_lock.py > "$CI_OUT/python-lock.json"
+      uv lock --check --offline
+    else
+      python3 testkit env prepare --uv uv --cache-config config/cache-ephemeral.json --export-github
+    fi
     ;;
   run)
     case "$2" in

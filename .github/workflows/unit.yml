@@ -30,6 +30,10 @@ on:
       ref:
         type: string
         required: true
+      runtime:
+        type: string
+        default: legacy
+        description: "legacy or nix; only test-unit selects the locked Nix shell"
     secrets:
       GIE_GIT_TOKEN:
         required: true
@@ -86,6 +90,7 @@ jobs:
       CI_JOB: ${{ matrix.id }}
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
+      CI_RUNTIME: ${{ inputs.runtime }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -110,19 +115,26 @@ jobs:
           else
             echo "ENTRY=$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}" >> "$GITHUB_ENV"
           fi
+      - id: nix
+        if: inputs.runtime == 'nix'
+        uses: ./ciw/.github/actions/test-nix
+        with:
+          source: src
+          output: ${{ env.CI_OUT }}
       - uses: astral-sh/setup-uv@v6
+        if: inputs.runtime != 'nix'
         with:
           enable-cache: false
       - uses: actions/setup-python@v5
-        if: matrix.python != ''
+        if: inputs.runtime != 'nix' && matrix.python != ''
         with:
           python-version: ${{ matrix.python }}
       - name: Select Rust toolchain
-        if: matrix.rust_cache
+        if: inputs.runtime != 'nix' && matrix.rust_cache
         working-directory: src
         run: rustup show active-toolchain || rustup show
       - uses: Swatinem/rust-cache@v2
-        if: matrix.rust_cache
+        if: inputs.runtime != 'nix' && matrix.rust_cache
         with:
           workspaces: src
           prefix-key: v1-${{ inputs.repo }}
@@ -130,10 +142,20 @@ jobs:
           cache-on-failure: true
       - name: setup ${{ matrix.id }}
         working-directory: src
-        run: bash "$ENTRY" setup "$CI_JOB"
+        run: |
+          if [ "$CI_RUNTIME" = nix ]; then
+            python3 "$GITHUB_WORKSPACE/ciw/ci/nix_entry.py" "$PWD" "$ENTRY" setup "$CI_JOB"
+          else
+            bash "$ENTRY" setup "$CI_JOB"
+          fi
       - name: run ${{ matrix.id }}
         working-directory: src
-        run: bash "$ENTRY" run "$CI_JOB"
+        run: |
+          if [ "$CI_RUNTIME" = nix ]; then
+            python3 "$GITHUB_WORKSPACE/ciw/ci/nix_entry.py" "$PWD" "$ENTRY" run "$CI_JOB"
+          else
+            bash "$ENTRY" run "$CI_JOB"
+          fi
       - name: Record job result
         if: always()
         run: echo '${{ job.status }}' > "$CI_OUT/.ci-job-status"
@@ -155,6 +177,7 @@ jobs:
       CI_IN: ${{ github.workspace }}/.ci-in
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
+      CI_RUNTIME: ${{ inputs.runtime }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -173,6 +196,12 @@ jobs:
           token: ${{ secrets.GIE_GIT_TOKEN }}
           path: src
           persist-credentials: false
+      - id: nix
+        if: needs.prepare.outputs.report == 'true' && inputs.runtime == 'nix'
+        uses: ./ciw/.github/actions/test-nix
+        with:
+          source: src
+          output: ${{ env.CI_OUT }}
       - name: Entry report (cross-job audit)
         id: entry
         if: needs.prepare.outputs.report == 'true'
@@ -188,7 +217,11 @@ jobs:
             entry="$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}"
           fi
           set +e
-          bash "$entry" report
+          if [ "$CI_RUNTIME" = nix ]; then
+            python3 "$GITHUB_WORKSPACE/ciw/ci/nix_entry.py" "$PWD" "$entry" report
+          else
+            bash "$entry" report
+          fi
           echo "rc=$?" >> "$GITHUB_OUTPUT"
       - name: Upload report outputs
         if: needs.prepare.outputs.report == 'true'
@@ -200,6 +233,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Final status (only writer)
+        if: always()
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
           REPO: ${{ inputs.repo }}
@@ -208,5 +242,10 @@ jobs:
           KIND: ${{ needs.prepare.outputs.kind }}
           JOBS: ${{ needs.prepare.outputs.jobs }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
-          REPORT_RC: ${{ steps.entry.outputs.rc }}
-        run: python3 ciw/ci/report.py
+          REPORT_RC: ${{ needs.prepare.outputs.report == 'true' && (steps.entry.outputs.rc || 'missing') || '' }}
+        run: |
+          if [ "$CI_RUNTIME" = nix ] && [ '${{ steps.nix.outcome }}' = success ]; then
+            nix develop --offline "$GITHUB_WORKSPACE/src" --command python3 "$GITHUB_WORKSPACE/ciw/ci/report.py"
+          else
+            python3 ciw/ci/report.py
+          fi

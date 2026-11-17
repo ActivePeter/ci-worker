@@ -59,3 +59,11 @@ python -m ci_worker workers --scheduler http://127.0.0.1:8080
 
 任务无持久化（内存队列，重启即丢）；worker 超过 30 秒没心跳会被标记离线。这些是
 刻意留的简化，作为骨架示例，不做生产级高可用。
+
+## testkit 的锁定 Nix 环境
+
+`run-test-unit` 为 reusable `unit.yml` 显式选择 `runtime: nix`；Dynamo/ext 保持默认 legacy 环境。prepare 仅用标准库规划，测试 setup/run、跨 job exact-ID report 和正常的最终状态回写都使用被测 SHA 的 Nix devShell。缺锁或环境失败会判红；report 缺失不能被当作成功。
+
+使用 cachix/install-nix-action 安装 Nix 2.35.6，只复用当前机器 `/nix/store`，正常获取锁定的官方公开依赖；不配置自建 substituter，不上传 store，也不恢复跨 runner 缓存。setup 不再安装旧镜像 Python 环境，改为验证解释器来源与 Python 锁。
+
+每个 job 的 artifacts 保存 `nix-timings.json`、原始 Nix activity 日志和 setup/run/report 墙钟。首次 realization 与同一 job 中的立即重复 realization 分开记录；不同 hosted jobs/runs 不称热缓存。substitution、derivation build 和 file transfer 按各类别区间并集计时，类别可以重叠，不能相加；固定输出下载仍可能归入 Nix derivation build。full workflow 墙钟另与旧约 194 秒基线比较。
