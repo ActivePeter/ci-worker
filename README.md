@@ -59,3 +59,14 @@ python -m ci_worker workers --scheduler http://127.0.0.1:8080
 
 任务无持久化（内存队列，重启即丢）；worker 超过 30 秒没心跳会被标记离线。这些是
 刻意留的简化，作为骨架示例，不做生产级高可用。
+
+## test 的 Nix setup（P1，main 默认尚未切换）
+
+`run-test-unit.yml` 的 `setup=nix` 在被测提交的 `devShells.default` 内运行原入口、static 和 4 个单测分片，report 沿用原 exact-ID 汇总。Nix 模式不再执行 uv 环境安装或选择宿主 Rust。所有模式保留 `ci/public-worker/test-unit`；只有显式的 `poison_host=true` 负对照使用独立的 `ci/public-worker/test-unit-host-poison-<setup>`，避免覆盖正常门禁。
+
+全局只用仓库变量 `TEST_UNIT_SETUP` 选择 `legacy` / `nix`，未设置时为 `legacy`；手动 dispatch 的 `setup` 可在 PR 阶段覆盖。**本 PR 不更改 main 的变量或分支保护**。审完启用：将 ci-worker 仓库变量设为 `nix`；回退：同一个变量设为 `legacy`。旧提交没有仓库入口时继续走 fallback，已有入口和检查名不变。
+
+按 11-17 最新约定，各 runner 只复用自己的 `/nix/store`；不配置项目外部缓存、跨机 substituter、Actions store 备份或 nix-serve。产物中 `local-store-cold.seconds` 是该 runner 首次求值/实现 devShell 的墙钟（含依赖准备），`local-store-hot.seconds` 是同一 runner 再次实现的墙钟，`test-execution.seconds` 只计已实现环境内的测试；不是跨机下载计时。不同 job 位于独立 runner，各自有独立的冷/热记录。
+
+`poison_host=true` 在入口之前移除 PATH 中所有提供 rustc 的目录，并将 python/python3 替换为退出 93 的命令；先把突变生效证据写入 `host-poison.txt`。相同突变在 legacy setup 必须失败、Nix 模式必须通过。详细验收与计时见 test 仓库 `docs/nix-toolchain.md` 和设计正本：
+https://coretokenai.feishu.cn/wiki/IVk3wbr9jiCHeUk4H3Nc9VNGnYf

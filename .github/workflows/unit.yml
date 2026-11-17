@@ -30,6 +30,12 @@ on:
       ref:
         type: string
         required: true
+      test_setup:
+        type: string
+        default: legacy
+      test_poison_host:
+        type: boolean
+        default: false
     secrets:
       GIE_GIT_TOKEN:
         required: true
@@ -83,6 +89,8 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.jobs) }}
     env:
+      TEST_UNIT_SETUP: ${{ inputs.test_setup }}
+      TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
       CI_JOB: ${{ matrix.id }}
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
@@ -110,19 +118,25 @@ jobs:
           else
             echo "ENTRY=$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}" >> "$GITHUB_ENV"
           fi
+      - uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
+        if: inputs.test_setup == 'nix'
+        with:
+          nix_conf: |
+            experimental-features = nix-command flakes
       - uses: astral-sh/setup-uv@v6
+        if: inputs.test_setup != 'nix'
         with:
           enable-cache: false
       - uses: actions/setup-python@v5
-        if: matrix.python != ''
+        if: inputs.test_setup != 'nix' && matrix.python != ''
         with:
           python-version: ${{ matrix.python }}
       - name: Select Rust toolchain
-        if: matrix.rust_cache
+        if: inputs.test_setup != 'nix' && matrix.rust_cache
         working-directory: src
         run: rustup show active-toolchain || rustup show
       - uses: Swatinem/rust-cache@v2
-        if: matrix.rust_cache
+        if: inputs.test_setup != 'nix' && matrix.rust_cache
         with:
           workspaces: src
           prefix-key: v1-${{ inputs.repo }}
@@ -130,10 +144,10 @@ jobs:
           cache-on-failure: true
       - name: setup ${{ matrix.id }}
         working-directory: src
-        run: bash "$ENTRY" setup "$CI_JOB"
+        run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
       - name: run ${{ matrix.id }}
         working-directory: src
-        run: bash "$ENTRY" run "$CI_JOB"
+        run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
       - name: Record job result
         if: always()
         run: echo '${{ job.status }}' > "$CI_OUT/.ci-job-status"

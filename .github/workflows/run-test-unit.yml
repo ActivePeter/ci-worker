@@ -11,6 +11,14 @@ on:
       ref:
         description: "branch / tag / full SHA to run unit CI on"
         required: true
+      setup:
+        description: "PR proof override: legacy or nix; empty uses TEST_UNIT_SETUP (default legacy)"
+        required: false
+        default: ''
+      poison_host:
+        description: "Negative control: remove host rustc and replace host Python"
+        type: boolean
+        default: false
   repository_dispatch:
     types: [run-test-unit]
 
@@ -26,8 +34,10 @@ jobs:
     uses: ./.github/workflows/unit.yml
     with:
       repo: goodputai/test
-      context: ci/public-worker/test-unit
+      context: ${{ (github.event.client_payload.poison_host == true || github.event.inputs.poison_host == 'true') && format('ci/public-worker/test-unit-host-poison-{0}', github.event.client_payload.setup || github.event.inputs.setup || vars.TEST_UNIT_SETUP || 'legacy') || 'ci/public-worker/test-unit' }}
       default_entry: ci/defaults/test.sh
+      test_setup: ${{ github.event.client_payload.setup || github.event.inputs.setup || vars.TEST_UNIT_SETUP || 'legacy' }}
+      test_poison_host: ${{ github.event.client_payload.poison_host == true || github.event.inputs.poison_host == 'true' }}
       ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
     secrets:
       GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
