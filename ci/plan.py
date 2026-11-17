@@ -31,6 +31,7 @@ def normalize(plan):
             "id": ident,
             "timeout": max(1, min(int(job.get("timeout", 20)), 60)),
             "python": str(job.get("python", "")),
+            "shared": bool(job.get("shared", False)),
             "rust_cache": bool(job.get("rust_cache", False)),
             "go": bool(job.get("go", False)),
             "go_version": str(job.get("go_version", "")),
@@ -40,7 +41,21 @@ def normalize(plan):
         })
     if not jobs or len(jobs) > MAX_JOBS:
         raise ValueError(f"plan must declare 1..{MAX_JOBS} jobs")
+    if any(job["shared"] for job in jobs) and plan.get("shared") is None:
+        raise ValueError("shared consumers require a shared preparation job")
     return jobs, bool(plan.get("report", False))
+
+
+def normalize_shared(plan):
+    record = plan.get("shared")
+    if record is None:
+        return None
+    if not isinstance(record, dict) or set(record) - {"id", "timeout", "fetch_depth"}:
+        raise ValueError("shared must declare only id, timeout and fetch_depth")
+    shared = normalize({"version": 1, "jobs": [record]})[0][0]
+    if any(str(job.get("id", "")) == shared["id"] for job in plan.get("jobs", [])):
+        raise ValueError("shared preparation id must differ from matrix job ids")
+    return {name: shared[name] for name in ("id", "timeout", "fetch_depth")}
 
 
 def main():
@@ -57,12 +72,17 @@ def main():
     out.flush()
     try:
         text = subprocess.check_output(["bash", str(entry), "plan"], cwd=src, text=True, timeout=120)
-        jobs, report = normalize(json.loads(text))
+        plan = json.loads(text)
+        jobs, report = normalize(plan)
+        shared = normalize_shared(plan)
     except Exception as error:
         print(f"::error::plan failed ({kind} entry {entry}): {error}")
         raise SystemExit(1)
     out.write(f"jobs={json.dumps(jobs, separators=(',', ':'))}\nreport={'true' if report else 'false'}\n")
-    names = ", ".join(job["id"] for job in jobs)
+    report_jobs = ([shared] if shared else []) + jobs
+    out.write(f"shared={json.dumps(shared, separators=(',', ':')) if shared else ''}\n")
+    out.write(f"report_jobs={json.dumps(report_jobs, separators=(',', ':'))}\n")
+    names = ", ".join(job["id"] for job in report_jobs)
     print(f"{kind} entry {entry}: {len(jobs)} jobs [{names}] report={report}")
     label = "legacy default · " if kind == "legacy" else ""
     status.post(repo, sha, "pending", context, f"{label}running {len(jobs)} jobs: {names}", status.run_url())
