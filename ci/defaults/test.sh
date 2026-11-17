@@ -4,6 +4,10 @@
 # class-level shards of scripts/ci_shards.py (one worker per core in each
 # shard), and its exact-ID audit across shards as the report step.
 set -euo pipefail
+if [[ "${TEST_UNIT_SETUP:-legacy}" != legacy ]]; then
+  echo "test legacy fallback only supports TEST_UNIT_SETUP=legacy; nix requires a target entry and nix/ci.sh" >&2
+  exit 2
+fi
 SHARDS="${TEST_UNIT_SHARDS:-4}"
 export TESTKIT_CI=1 PYTHONDONTWRITEBYTECODE=1
 

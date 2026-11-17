@@ -59,3 +59,11 @@ python -m ci_worker workers --scheduler http://127.0.0.1:8080
 
 任务无持久化（内存队列，重启即丢）；worker 超过 30 秒没心跳会被标记离线。这些是
 刻意留的简化，作为骨架示例，不做生产级高可用。
+
+## test 的可回退环境选择
+
+`run-test-unit.yml` 只负责控制面：`setup` dispatch 输入优先于仓库变量 `TEST_UNIT_SETUP`，未设置时为 **legacy**。目标仓 `.github/ci/public-unit.sh` 的 setup/run/report 与原生 action 使用同一个选择；legacy 实际走原 `testkit env prepare`，Nix 的安装、锁定环境、隔离和计时统一由 test 仓 `nix/ci.sh` / `scripts/ci_nix.py` 实现。worker 不安装 Nix、不调用 `nix develop` 或 `print-dev-env`。没有目标入口和 `nix/ci.sh` 的旧提交只支持 legacy，显式选择 nix 会拒绝。
+
+正常门禁始终为 `ci/public-worker/test-unit`。`poison_host=true` 只污染目标入口子进程，移除提供 rustc 的 PATH 目录，将 python/python3 替换为 exit93，记录 `host-poison.txt`；负对照使用独立的 `ci/public-worker/test-unit-host-poison-<setup>`。concurrency 同时区分 PR/branch、setup 和 poison/clean。prepare 与最终状态回写使用隔离的标准库 Python；matrix/report 作业及其产物步骤任一失败、或必需 report 缺失，都不能回写成功。Dynamo/ext 保持默认 legacy 路线。
+
+本 PR 不修改 main 的仓库变量、分支保护或必需 context，也不切换默认门禁。环境和计量的唯一集成点是 [test#187](https://github.com/goodputai/test/pull/187)，协议见[协调评论](https://github.com/goodputai/test/pull/187#issuecomment-6943572817)；本批吸收 [worker#4](https://github.com/ActivePeter/ci-worker/pull/4) 的选择、dispatch 和负控隔离。只复用每台机器自己的 store，不恢复共享缓存或 nix-serve。main 门禁切到 Nix 仍须先报审。

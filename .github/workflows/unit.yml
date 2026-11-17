@@ -30,6 +30,12 @@ on:
       ref:
         type: string
         required: true
+      test_setup:
+        type: string
+        default: legacy
+      test_poison_host:
+        type: boolean
+        default: false
     secrets:
       GIE_GIT_TOKEN:
         required: true
@@ -71,7 +77,8 @@ jobs:
           DEFAULT_ENTRY: ${{ inputs.default_entry }}
           SRC: src
           CIW: ciw
-        run: python3 ciw/ci/plan.py
+          TEST_UNIT_SETUP: ${{ inputs.test_setup }}
+        run: /usr/bin/python3 -I ciw/ci/plan.py
 
   run:
     needs: prepare
@@ -83,6 +90,9 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.jobs) }}
     env:
+      TEST_UNIT_SETUP: ${{ inputs.test_setup }}
+      TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
+      CI_ENTRY_KIND: ${{ needs.prepare.outputs.kind }}
       CI_JOB: ${{ matrix.id }}
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
@@ -111,18 +121,19 @@ jobs:
             echo "ENTRY=$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}" >> "$GITHUB_ENV"
           fi
       - uses: astral-sh/setup-uv@v6
+        if: inputs.test_setup != 'nix'
         with:
           enable-cache: false
       - uses: actions/setup-python@v5
-        if: matrix.python != ''
+        if: inputs.test_setup != 'nix' && matrix.python != ''
         with:
           python-version: ${{ matrix.python }}
       - name: Select Rust toolchain
-        if: matrix.rust_cache
+        if: inputs.test_setup != 'nix' && matrix.rust_cache
         working-directory: src
         run: rustup show active-toolchain || rustup show
       - uses: Swatinem/rust-cache@v2
-        if: matrix.rust_cache
+        if: inputs.test_setup != 'nix' && matrix.rust_cache
         with:
           workspaces: src
           prefix-key: v1-${{ inputs.repo }}
@@ -130,10 +141,10 @@ jobs:
           cache-on-failure: true
       - name: setup ${{ matrix.id }}
         working-directory: src
-        run: bash "$ENTRY" setup "$CI_JOB"
+        run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
       - name: run ${{ matrix.id }}
         working-directory: src
-        run: bash "$ENTRY" run "$CI_JOB"
+        run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
       - name: Record job result
         if: always()
         run: echo '${{ job.status }}' > "$CI_OUT/.ci-job-status"
@@ -152,6 +163,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
+      TEST_UNIT_SETUP: ${{ inputs.test_setup }}
+      TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
+      CI_ENTRY_KIND: ${{ needs.prepare.outputs.kind }}
       CI_IN: ${{ github.workspace }}/.ci-in
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
@@ -188,7 +202,7 @@ jobs:
             entry="$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}"
           fi
           set +e
-          bash "$entry" report
+          ENTRY="$entry" bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" report
           echo "rc=$?" >> "$GITHUB_OUTPUT"
       - name: Upload report outputs
         if: needs.prepare.outputs.report == 'true'
@@ -200,6 +214,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
       - name: Final status (only writer)
+        if: always()
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
           REPO: ${{ inputs.repo }}
@@ -208,5 +223,7 @@ jobs:
           KIND: ${{ needs.prepare.outputs.kind }}
           JOBS: ${{ needs.prepare.outputs.jobs }}
           PREPARE_RESULT: ${{ needs.prepare.result }}
-          REPORT_RC: ${{ steps.entry.outputs.rc }}
-        run: python3 ciw/ci/report.py
+          RUN_RESULT: ${{ needs.run.result }}
+          REPORT_JOB_RESULT: ${{ job.status }}
+          REPORT_RC: ${{ needs.prepare.outputs.report == 'true' && (steps.entry.outputs.rc || 'missing') || '' }}
+        run: /usr/bin/python3 -I ciw/ci/report.py
