@@ -128,7 +128,7 @@ class FinalReport(unittest.TestCase):
             (job / '.ci-job-status').write_text('success')
             env = dict(REPO='fixture/test', CONTEXT='fixture-context', SHA='exact-sha',
                        KIND='target', JOBS=json.dumps([dict(id='static')]),
-                       PREPARE_RESULT='success', CI_IN=str(root),
+                       PREPARE_RESULT='success', RUN_RESULT='success', REPORT_JOB_RESULT='success', CI_IN=str(root),
                        GITHUB_SERVER_URL='https://github.com', GITHUB_REPOSITORY='fixture/worker',
                        GITHUB_RUN_ID='fixture-run')
             for rc, expected in [('missing', 1), ('1', 1), ('0', 0)]:
@@ -137,6 +137,50 @@ class FinalReport(unittest.TestCase):
                     post.assert_called_once()
                     self.assertEqual(post.call_args.args[0:4],
                                      ('fixture/test', 'exact-sha', 'failure' if expected else 'success', 'fixture-context'))
+
+
+    def test_matrix_or_report_job_failure_overrides_successful_markers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); job = root / 'job-static'; job.mkdir()
+            (job / '.ci-job-status').write_text('success')
+            env = dict(REPO='fixture/test', CONTEXT='fixture-context', SHA='exact-sha',
+                       KIND='target', JOBS=json.dumps([dict(id='static')]), REPORT_RC='0',
+                       PREPARE_RESULT='success', CI_IN=str(root),
+                       GITHUB_SERVER_URL='https://github.com', GITHUB_REPOSITORY='fixture/worker',
+                       GITHUB_RUN_ID='fixture-run')
+            cases = [('success', 'success', 0)]
+            for outcome in ('failure', 'cancelled', 'skipped', None):
+                cases += [(outcome, 'success', 1), ('success', outcome, 1)]
+            for matrix, report_job, expected in cases:
+                selected = dict(env)
+                if matrix is not None:
+                    selected['RUN_RESULT'] = matrix
+                if report_job is not None:
+                    selected['REPORT_JOB_RESULT'] = report_job
+                with self.subTest(matrix=matrix, report_job=report_job), patch.dict(os.environ, selected, clear=True), patch.object(report.status, 'post') as post:
+                    self.assertEqual(report.main(), expected)
+                    post.assert_called_once()
+                    self.assertEqual(post.call_args.args[2], 'failure' if expected else 'success')
+                    if not expected:
+                        self.assertEqual(post.call_args.args[4], '1/1 jobs ok')
+
+    def test_failed_artifact_step_stays_red_after_successful_target_report(self):
+        failed_step = subprocess.run(['/bin/sh', '-c', 'exit 1'], check=False)
+        self.assertEqual(failed_step.returncode, 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); job = root / 'job-static'; job.mkdir()
+            (job / '.ci-job-status').write_text('success')
+            env = dict(REPO='fixture/test', CONTEXT='fixture-context', SHA='exact-sha',
+                       KIND='target', JOBS=json.dumps([dict(id='static')]), REPORT_RC='0',
+                       PREPARE_RESULT='success', RUN_RESULT='success',
+                       REPORT_JOB_RESULT='failure' if failed_step.returncode else 'success',
+                       CI_IN=str(root), GITHUB_SERVER_URL='https://github.com',
+                       GITHUB_REPOSITORY='fixture/worker', GITHUB_RUN_ID='fixture-run')
+            with patch.dict(os.environ, env, clear=True), patch.object(report.status, 'post') as post:
+                self.assertEqual(report.main(), 1)
+                post.assert_called_once()
+                self.assertEqual(post.call_args.args[2], 'failure')
+                self.assertIn('workflow:report', post.call_args.args[4])
 
 
 if __name__ == '__main__':

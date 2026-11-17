@@ -1,7 +1,9 @@
 """report: the only writer of the final ci/public-worker/<name> status.
 
-success iff prepare succeeded, every planned job left a `success` marker and the
-optional entry `report` step passed. The description names every red job.
+success iff prepare, the matrix and this report job succeeded, every planned job
+left a `success` marker and the optional entry `report` passed. Artifact/step
+failures must not disappear behind successful markers. The description names
+every red job.
 """
 import json
 import os
@@ -25,11 +27,15 @@ def main():
         for job in jobs:
             marker = ci_in / f"job-{job['id']}" / ".ci-job-status"
             results[job["id"]] = marker.read_text().strip() if marker.is_file() else "missing"
+        for gate, variable in (("workflow:matrix", "RUN_RESULT"), ("workflow:report", "REPORT_JOB_RESULT")):
+            outcome = os.environ.get(variable, "missing")
+            if outcome != "success":
+                results[gate] = f"failure(result={outcome})"
         report_rc = os.environ.get("REPORT_RC", "")
         if report_rc not in ("", "0"):
             results["report"] = f"failure(rc={report_rc})"
         red = [k for k, v in results.items() if v != "success"]
-        ok = len(jobs) - len([k for k in red if k != "report"])
+        ok = sum(results[job["id"]] == "success" for job in jobs)
         if not red:
             state, description = "success", f"{label}{ok}/{len(jobs)} jobs ok"
         elif all(results[k] == "cancelled" for k in red):
