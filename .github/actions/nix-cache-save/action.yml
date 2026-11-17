@@ -15,7 +15,14 @@ runs:
       with:
         path: /nix
         key: ${{ steps.freeze.outputs.store_key }}
-    - if: steps.freeze.outputs.save == 'true'
+    - id: stored
+      if: steps.freeze.outputs.save == 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: /nix
+        key: ${{ steps.freeze.outputs.store_key }}
+        lookup-only: true
+    - if: steps.freeze.outputs.save == 'true' && steps.stored.outputs.cache-hit == 'true'
       uses: actions/cache/save@v4
       with:
         path: ${{ runner.temp }}/testkit-nix-cache/manifest.json
