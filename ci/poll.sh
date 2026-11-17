@@ -25,7 +25,7 @@ else
   branches=$(get "repos/$REPO/branches?protected=true&per_page=100" |
     jq -r '.[] | "\(.commit.sha) branch-\(.name | gsub("[^A-Za-z0-9._-]"; "_"))"')
   [ -n "$branches" ] || echo "::warning::$REPO has no protected branch; only PR heads are polled"
-  work=$(printf '%s\n%s\n' "$prs" "$branches" | grep -v '^$' | sort -u -k1,1)
+  work=$(printf '%s\n%s\n' "$prs" "$branches" | awk 'NF' | sort -u -k1,1)
 fi
 
 dispatched=0

@@ -32,6 +32,10 @@ def normalize(plan):
             "timeout": max(1, min(int(job.get("timeout", 20)), 60)),
             "python": str(job.get("python", "")),
             "rust_cache": bool(job.get("rust_cache", False)),
+            "go": bool(job.get("go", False)),
+            "go_version": str(job.get("go_version", "")),
+            "node": str(job.get("node", "")),
+            "pnpm": str(job.get("pnpm", "")),
             "fetch_depth": max(0, int(job.get("fetch_depth", 1))),
         })
     if not jobs or len(jobs) > MAX_JOBS:

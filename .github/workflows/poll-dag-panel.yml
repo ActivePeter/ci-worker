@@ -1,0 +1,40 @@
+name: poll-dag-panel
+
+# Every 5 minutes: queue run-dag-panel-unit for each open non-fork PR head and each
+# protected-branch head of ActivePeter/dag-panel that has no ci/public-worker/dag-panel-unit status yet
+# (logic in ci/poll.sh; protected branches come from GitHub, not from here).
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "only poll this ref (empty = open PR heads + protected branches)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: ci
+      - name: Queue public unit CI for ActivePeter/dag-panel refs that need it
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+          ONLY_REF: ${{ github.event.inputs.ref }}
+        run: |
+          bash ci/poll.sh ActivePeter/dag-panel ci/public-worker/dag-panel-unit run-dag-panel-unit "$ONLY_REF"
+          # Private free-plan repositories may have no protected branches.
+          # Still check the default branch after merges, without pinning its name.
+          if [ -z "$ONLY_REF" ]; then
+            default_branch=$(GH_TOKEN="$GIE_GIT_TOKEN" gh api repos/ActivePeter/dag-panel --jq .default_branch)
+            bash ci/poll.sh ActivePeter/dag-panel ci/public-worker/dag-panel-unit run-dag-panel-unit "$default_branch"
+          fi

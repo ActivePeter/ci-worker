@@ -120,6 +120,20 @@ jobs:
           else
             echo "ENTRY=$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}" >> "$GITHUB_ENV"
           fi
+      - uses: actions/setup-go@v5
+        if: matrix.go
+        with:
+          go-version: ${{ matrix.go_version }}
+          go-version-file: src/go.mod
+          cache-dependency-path: src/go.sum
+      - uses: actions/setup-node@v4
+        if: matrix.node != ''
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: pnpm/action-setup@v4
+        if: matrix.pnpm != ''
+        with:
+          version: ${{ matrix.pnpm }}
       - uses: astral-sh/setup-uv@v6
         if: inputs.test_setup != 'nix'
         with:

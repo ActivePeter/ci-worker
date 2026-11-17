@@ -1,0 +1,28 @@
+name: run-dag-panel-unit
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "dag-panel branch / tag / full SHA to test"
+        required: true
+  repository_dispatch:
+    types: [run-dag-panel-unit]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run-dag-panel-unit-${{ github.event.client_payload.group || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    uses: ./.github/workflows/unit.yml
+    with:
+      repo: ActivePeter/dag-panel
+      context: ci/public-worker/dag-panel-unit
+      default_entry: ci/defaults/dag-panel.sh
+      ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+    secrets:
+      GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
