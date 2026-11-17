@@ -4,6 +4,10 @@
 # class-level shards of scripts/ci_shards.py (one worker per core in each
 # shard), and its exact-ID audit across shards as the report step.
 set -euo pipefail
+if [[ "${TEST_UNIT_SETUP:-legacy}" != legacy ]]; then
+  echo "test legacy fallback only supports TEST_UNIT_SETUP=legacy; nix requires a target entry and nix/ci.sh" >&2
+  exit 2
+fi
 SHARDS="${TEST_UNIT_SHARDS:-4}"
 export TESTKIT_CI=1 PYTHONDONTWRITEBYTECODE=1
 
@@ -17,13 +21,7 @@ print(json.dumps({"version": 1, "jobs": jobs, "report": True}))
 PY
     ;;
   setup)
-    if [ "${CI_RUNTIME:-legacy}" = nix ]; then
-      python -I -c 'import sys; assert sys.executable.startswith("/nix/store/"), sys.executable; print(sys.executable)'
-      python -I scripts/python_lock.py > "$CI_OUT/python-lock.json"
-      uv lock --check --offline
-    else
-      python3 testkit env prepare --uv uv --cache-config config/cache-ephemeral.json --export-github
-    fi
+    python3 testkit env prepare --uv uv --cache-config config/cache-ephemeral.json --export-github
     ;;
   run)
     case "$2" in
