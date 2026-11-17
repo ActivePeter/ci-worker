@@ -44,7 +44,7 @@ class CachePolicy(unittest.TestCase):
     def test_keys_include_platform_lock_and_full_frozen_manifest_hash(self):
         with patch.dict(os.environ, RUNNER_OS='Linux', RUNNER_ARCH='X64'), patch.object(nix_cache, 'inputs', return_value={'flake.lock': 'lock-hash'}):
             key = nix_cache.store_key(Path('.'), 'closure-fingerprint')
-        self.assertEqual(key, 'testkit-nix-store-v1-Linux-X64-lock-hash-closure-fingerprint')
+        self.assertEqual(key, 'testkit-nix-store-v2-Linux-X64-lock-hash-closure-fingerprint')
 
     def test_main_history_accepts_merged_sha_and_rejects_pr_or_missing_ref(self):
         from types import SimpleNamespace
@@ -54,6 +54,19 @@ class CachePolicy(unittest.TestCase):
             with patch.dict(os.environ, environment), patch.object(nix_cache.subprocess, 'run', return_value=SimpleNamespace(returncode=rc)) as run:
                 self.assertEqual(nix_cache.writer_allowed(Path('.')), expected)
                 self.assertEqual(run.call_args.args[0], ['git', 'merge-base', '--is-ancestor', 'pinned-main-history-sha', 'refs/remotes/origin/main'])
+
+    def test_restored_no_daemon_store_works_without_any_home_profile(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / 'payload-nix-2.35.6' / 'bin' / 'nix'
+            binary.parent.mkdir(parents=True)
+            binary.write_text('#!/bin/sh\nexit 0\n'); binary.chmod(0o755)
+            closure = SimpleNamespace()
+            with patch.object(Path, 'home', return_value=root / 'fresh-home'), patch.object(Path, 'glob', lambda path, pattern: [binary] if str(path) == '/nix/store' else []), patch.object(Path, 'is_file', lambda path: path == binary):
+                self.assertEqual(nix_cache.bind_nix(closure), binary)
+            self.assertEqual(closure.NIX, str(binary))
+            self.assertEqual(closure.NIX_STORE, str(binary.with_name('nix-store')))
 
     def test_default_main_cannot_save_a_pr_sha(self):
         from types import SimpleNamespace

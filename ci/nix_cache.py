@@ -54,12 +54,12 @@ def platform():
 
 
 def store_key(src, fingerprint):
-    return f'testkit-nix-store-v1-{platform()}-{inputs(src)["flake.lock"]}-{fingerprint}'
+    return f'testkit-nix-store-v2-{platform()}-{inputs(src)["flake.lock"]}-{fingerprint}'
 
 
 def identity(src, meta):
     meta.mkdir(parents=True, exist_ok=True)
-    emit(index_key=f'testkit-nix-index-v1-{platform()}-{inputs(src)["flake.lock"]}-{digest(inputs(src))}')
+    emit(index_key=f'testkit-nix-index-v2-{platform()}-{inputs(src)["flake.lock"]}-{digest(inputs(src))}')
 
 
 def read(src, meta):
@@ -93,6 +93,10 @@ def select(src, meta):
 def bind_nix(closure):
     candidates = [Path('/nix/var/nix/profiles/default/bin/nix'), Path.home() / '.nix-profile/bin/nix']
     candidates += list(Path('/nix/var/nix/profiles/per-user').glob('*/profile/bin/nix'))
+    # Nix 2.35.6's no-daemon installer keeps the user profile under HOME's
+    # XDG state directory, outside the archive. The pinned installed payload
+    # itself is in /nix/store and survives restoration without that symlink.
+    candidates += sorted(Path('/nix/store').glob('*-nix-2.35.6/bin/nix'))
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             closure.NIX = str(candidate)
