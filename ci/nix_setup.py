@@ -26,7 +26,7 @@ def union_seconds(intervals):
 def realize(source, output, label):
     started = time.monotonic()
     active, intervals, counts = {}, {name: [] for name in ACTIVITIES.values()}, {}
-    command = ["nix", "print-dev-env", "--json", "--log-format", "internal-json", str(source)]
+    command = ["nix", "print-dev-env", "--no-update-lock-file", "--json", "--log-format", "internal-json", str(source)]
     events = output / (label + ".events.jsonl")
     with tempfile.TemporaryFile(mode="w+") as stdout, events.open("w") as trace:
         child = subprocess.Popen(command, stdout=stdout, stderr=subprocess.PIPE, text=True)

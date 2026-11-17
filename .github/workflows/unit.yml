@@ -245,7 +245,7 @@ jobs:
           REPORT_RC: ${{ needs.prepare.outputs.report == 'true' && (steps.entry.outputs.rc || 'missing') || '' }}
         run: |
           if [ "$CI_RUNTIME" = nix ] && [ '${{ steps.nix.outcome }}' = success ]; then
-            nix develop --offline "$GITHUB_WORKSPACE/src" --command python3 "$GITHUB_WORKSPACE/ciw/ci/report.py"
+            nix develop --no-update-lock-file --offline "$GITHUB_WORKSPACE/src" --command python3 "$GITHUB_WORKSPACE/ciw/ci/report.py"
           else
             python3 ciw/ci/report.py
           fi

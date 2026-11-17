@@ -8,7 +8,7 @@ import time
 
 source, entry, phase, *args = sys.argv[1:]
 started = time.monotonic()
-result = subprocess.run(["nix", "develop", "--offline", source, "--command", "bash", entry, phase, *args])
+result = subprocess.run(["nix", "develop", "--no-update-lock-file", "--offline", source, "--command", "bash", entry, phase, *args])
 output = Path(os.environ["CI_OUT"])
 output.mkdir(parents=True, exist_ok=True)
 (output / (phase + "-timing.json")).write_text(json.dumps({
