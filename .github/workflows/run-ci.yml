@@ -37,21 +37,7 @@ permissions:
   contents: read
 
 jobs:
-  # The already registered generic entry also accepts a candidate worker ref.
-  # This permits verification before the new poll/run workflows are merged.
-  dag-panel:
-    if: (github.event.inputs.target_repo || github.event.client_payload.target_repo) == 'ActivePeter/dag-panel'
-    uses: ./.github/workflows/unit.yml
-    with:
-      repo: ActivePeter/dag-panel
-      context: ci/public-worker/dag-panel-unit
-      default_entry: ci/defaults/dag-panel.sh
-      ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
-    secrets:
-      GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
-
   ci:
-    if: (github.event.inputs.target_repo || github.event.client_payload.target_repo) != 'ActivePeter/dag-panel'
     runs-on: ubuntu-latest
     steps:
       - name: Resolve inputs (manual or repository_dispatch)
