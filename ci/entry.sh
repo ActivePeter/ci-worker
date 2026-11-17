@@ -34,6 +34,9 @@ if [[ "$mode" == nix ]]; then
       "${develop[@]}" --command bash "$ENTRY" "$@"
     /usr/bin/time -f '%e' -o "$CI_OUT/local-store-hot.seconds" \
       "${develop[@]}" --command true
+    "${develop[@]}" --command bash -c \
+      'command -v python python3 rustc; python --version; rustc --version' \
+      > "$CI_OUT/toolchain.txt"
     exit 0
   fi
   # Time only execution inside the realized environment, excluding evaluation.
