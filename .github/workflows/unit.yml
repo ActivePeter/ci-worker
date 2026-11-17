@@ -87,7 +87,8 @@ jobs:
     needs: prepare
     name: ${{ matrix.id }}
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ matrix.timeout }}
+    # Existing test revisions request 60m; Rust cold builds include the signature control.
+    timeout-minutes: ${{ inputs.repo == 'goodputai/test' && startsWith(matrix.id, 'nix-cpu-mocker-rust') && 120 || matrix.timeout }}
     strategy:
       fail-fast: false
       matrix:
