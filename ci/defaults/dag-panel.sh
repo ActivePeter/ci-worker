@@ -19,6 +19,11 @@ print(json.dumps(dict(version=1, jobs=jobs, report=False)))
 PLAN
     ;;
   setup)
+    # build_deploy.py is exercised by collector runtime-identity fixtures.
+    # setup-python's isolated interpreter does not inherit Ubuntu's python3-yaml.
+    if [[ "${2:?job required}" == collector ]]; then
+      python3 -m pip install --disable-pip-version-check PyYAML==6.0.3
+    fi
     case "${2:?job required}" in
       lint|unit|collector|machine-ui1)
         pnpm --dir web install --frozen-lockfile
