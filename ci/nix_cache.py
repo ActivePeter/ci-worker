@@ -66,6 +66,7 @@ def read(src, meta):
     value = json.loads((meta / 'manifest.json').read_text())
     closure = module(src, 'nix_closure')
     frozen = closure.validate(value['manifest'], frozen=True)
+    bootstrap_path(closure, value['bootstrap'])
     fingerprint = closure.manifest_fingerprint(frozen)
     if (value['schema'] != SCHEMA or value['inputs'] != inputs(src)
             or value['platform'] != platform() or value['fingerprint'] != fingerprint
@@ -95,14 +96,22 @@ def bootstrap_record(nix):
     return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
 
 
+def bootstrap_path(closure, bootstrap):
+    if not isinstance(bootstrap, dict) or set(bootstrap) != {'path', 'sha256'}:
+        raise ValueError('invalid cached bootstrap record')
+    candidate = Path(bootstrap['path'])
+    closure.store_path(str(candidate.parent.parent))
+    checksum = bootstrap['sha256']
+    if (candidate.name != 'nix' or candidate.parent.name != 'bin'
+            or not isinstance(checksum, str) or len(checksum) != 64
+            or any(char not in '0123456789abcdef' for char in checksum)):
+        raise ValueError('bootstrap must name a store bin/nix and SHA256')
+    return candidate
+
+
 def bind_nix(closure, bootstrap=None):
     if bootstrap is not None:
-        if not isinstance(bootstrap, dict) or set(bootstrap) != {'path', 'sha256'}:
-            raise ValueError('invalid cached bootstrap record')
-        candidate = Path(bootstrap['path'])
-        closure.store_path(str(candidate.parent.parent))
-        if candidate.name != 'nix' or candidate.parent.name != 'bin':
-            raise ValueError('bootstrap must name a store bin/nix executable')
+        candidate = bootstrap_path(closure, bootstrap)
         if (not candidate.is_file() or not os.access(candidate, os.X_OK)
                 or not candidate.with_name('nix-store').is_file()
                 or not os.access(candidate.with_name('nix-store'), os.X_OK)
