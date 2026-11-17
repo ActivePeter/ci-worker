@@ -1,0 +1,38 @@
+name: Nix cache contract
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ciw
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: goodputai/test
+          ref: 75f2b653831e98acfacd6017c3203a9684c0abdb
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          path: src
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Worker policy and existing regressions
+        working-directory: ciw
+        run: /usr/bin/python3 -m unittest discover -s ci -p 'test_*.py'
+      - name: Real dependency corruption rejects and cold-recovers
+        run: /usr/bin/python3 ciw/ci/nix_cache_contract.py --src src
+      - name: Removing restore verification reproduces the leak
+        shell: bash
+        run: |
+          set +e
+          /usr/bin/python3 ciw/ci/nix_cache_contract.py --src src --mutation skip-verify > negative.json
+          rc=$?
+          set -e
+          test "$rc" = 1
+          /usr/bin/python3 -I -c 'import json; d=json.loads(open("negative.json").read().splitlines()[-1]); assert d["corrupt_dependency_accepted"] and d["negative_control_reproduced"]'
+          cat negative.json

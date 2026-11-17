@@ -1,0 +1,31 @@
+name: Restore verified testkit Nix store
+description: Read-only cache restoration before the existing target setup.
+outputs:
+  index-key:
+    value: ${{ steps.identity.outputs.index_key }}
+  hit:
+    value: ${{ steps.store.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - id: identity
+      shell: bash
+      run: /usr/bin/python3 -I ciw/ci/nix_cache.py identity --src src --meta "$RUNNER_TEMP/testkit-nix-cache"
+    - uses: actions/cache/restore@v4
+      continue-on-error: true
+      with:
+        path: ${{ runner.temp }}/testkit-nix-cache/manifest.json
+        key: ${{ steps.identity.outputs.index_key }}
+    - id: select
+      shell: bash
+      run: /usr/bin/python3 -I ciw/ci/nix_cache.py select --src src --meta "$RUNNER_TEMP/testkit-nix-cache"
+    - id: store
+      if: steps.select.outputs.store_key != ''
+      uses: actions/cache/restore@v4
+      continue-on-error: true
+      with:
+        path: /nix
+        key: ${{ steps.select.outputs.store_key }}
+    - if: steps.select.outputs.store_key != ''
+      shell: bash
+      run: /usr/bin/python3 -I ciw/ci/nix_cache.py check --src src --meta "$RUNNER_TEMP/testkit-nix-cache"
