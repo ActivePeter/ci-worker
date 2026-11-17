@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: run-test-unit-${{ github.event.client_payload.group || github.event.client_payload.ref || github.event.inputs.ref }}
+  group: run-test-unit-${{ github.event.client_payload.group || github.event.client_payload.ref || github.event.inputs.ref }}-${{ github.event.client_payload.setup || github.event.inputs.setup || vars.TEST_UNIT_SETUP || 'legacy' }}-${{ (github.event.client_payload.poison_host == true || github.event.inputs.poison_host == 'true') && 'poison' || 'clean' }}
   cancel-in-progress: true
 
 jobs:
