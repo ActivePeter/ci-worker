@@ -107,13 +107,13 @@ def verify(value, closure, *, store=None):
     return closure.verify(value['manifest'], store=store)
 
 
-def check(src, meta):
+def check(src, meta, *, store=None):
     started = time.monotonic()
     state = 'hit'
     try:
         value, closure = read(src, meta)
         nix = bind_nix(closure)
-        verify(value, closure)
+        verify(value, closure, store=store)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         # The marker predates restore and is outside /nix. Move only the empty
         # hosted store this action owns; retain its bytes for diagnostics.
@@ -121,8 +121,13 @@ def check(src, meta):
         if (os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
                 or not marker.is_file() or marker.read_text() != os.environ['GITHUB_RUN_ID']):
             raise RuntimeError('cannot quarantine a store this run does not own') from error
-        quarantine = '/nix-cache-rejected-' + uuid.uuid4().hex
-        subprocess.run(['sudo', 'mv', '/nix', quarantine], check=True)
+        source = Path('/nix') if store is None else Path(store)
+        quarantine = source.with_name(source.name + '-cache-rejected-' + uuid.uuid4().hex)
+        if store is None:
+            subprocess.run(['sudo', 'mv', str(source), str(quarantine)], check=True)
+        else:
+            # Internal integration seam only; the CLI never accepts this option.
+            source.rename(quarantine)
         state = 'rejected-cold'
         print(f'::warning::Nix cache rejected; cold target setup follows: {error}; quarantine={quarantine}')
     else:
@@ -132,6 +137,7 @@ def check(src, meta):
     output = Path(os.environ['CI_OUT']); output.mkdir(parents=True, exist_ok=True)
     (output / 'nix-cache-restore.json').write_text(json.dumps(record, indent=2) + '\n')
     emit(**record)
+    return record
 
 
 def freeze(src, meta):
@@ -142,13 +148,17 @@ def freeze(src, meta):
             or os.environ.get('CI_JOB') != 'static'):
         emit(save='false', reason='reader only')
         return
-    main = subprocess.run(['git', 'ls-remote', 'origin', 'refs/heads/main'], cwd=src,
-                          text=True, capture_output=True, check=True, timeout=30).stdout.split()[0]
-    if main != os.environ['CI_REF_SHA']:
-        emit(save='false', reason='tested SHA is not target main')
-        return
     if os.environ.get('TESTKIT_NIX_CACHE_STATE') == 'hit':
         emit(save='false', reason='verified shared cache already exists')
+        return
+    main = os.environ['CI_REF_SHA']
+    # static has fetch-depth: 0. Trust the default-branch history fetched by
+    # checkout, so a later merge cannot invalidate a pinned main-SHA benchmark.
+    ancestry = subprocess.run(['git', 'merge-base', '--is-ancestor', main,
+                              'refs/remotes/origin/main'], cwd=src,
+                             text=True, capture_output=True, timeout=30)
+    if ancestry.returncode != 0:
+        emit(save='false', reason='tested SHA is not target main history')
         return
     closure = module(src, 'nix_closure')
     nix = bind_nix(closure)

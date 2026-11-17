@@ -42,26 +42,37 @@ def main():
         physical.write_text('DIRTY')
         # The root metadata/hash stays unchanged. Only the transitive bytes vary.
         assert closure.path_info(manifest['store_path'], store=store) == manifest['requisites']
+        os.environ.setdefault('RUNNER_OS', 'Linux')
+        os.environ.setdefault('RUNNER_ARCH', 'X64')
+        os.environ.setdefault('GITHUB_RUN_ID', 'contract')
+        os.environ['RUNNER_ENVIRONMENT'] = 'github-hosted'
+        os.environ['CI_OUT'] = str(parent / 'out')
+        meta = parent / 'meta'; meta.mkdir()
+        (meta / 'empty-store-owner').write_text(os.environ['GITHUB_RUN_ID'])
+        fingerprint = closure.manifest_fingerprint(manifest)
+        metadata = dict(schema=nix_cache.SCHEMA, inputs=nix_cache.inputs(args.src.resolve()),
+                        platform=nix_cache.platform(), manifest=manifest,
+                        fingerprint=fingerprint,
+                        store_key=nix_cache.store_key(args.src.resolve(), fingerprint))
+        (meta / 'manifest.json').write_text(json.dumps(metadata))
         original = nix_cache.verify
         if args.mutation:
             nix_cache.verify = lambda *a, **kw: None
-        rejected = False
         try:
-            nix_cache.verify(value, closure, store=store)
-        except (ValueError, subprocess.CalledProcessError):
-            rejected = True
+            restored = nix_cache.check(args.src.resolve(), meta, store=store)
         finally:
             nix_cache.verify = original
-        if not rejected:
+        if restored['state'] != 'rejected-cold' or store.exists():
             print(json.dumps(dict(successful=False, negative_control_reproduced=True,
                                   corrupt_dependency_accepted=True)))
             return 1
-        # Cold fallback uses a fresh store; restoring the same frozen input must
-        # reconstruct the same paths/hashes and pass the exact original gate.
-        store.rename(parent / 'quarantine')
+        assert list(parent.glob('restored-cache-rejected-*'))
+        # The production gate quarantined the store. Original setup now sees
+        # an empty location and reconstructs the same frozen input from cold.
         cold = seed(closure, store)
         assert cold == manifest
-        nix_cache.verify(value, closure, store=store)
+        recovered = nix_cache.check(args.src.resolve(), meta, store=store)
+        assert recovered['state'] == 'hit'
         print(json.dumps(dict(successful=True, corrupt_dependency_rejected=True,
                               cold_recovery_verified=True, requisites=len(manifest['requisites']))))
     return 0

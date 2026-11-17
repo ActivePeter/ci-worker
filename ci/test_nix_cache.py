@@ -48,7 +48,7 @@ class CachePolicy(unittest.TestCase):
 
     def test_default_main_cannot_save_a_pr_sha(self):
         from types import SimpleNamespace
-        with patch.object(nix_cache.subprocess, 'run', return_value=SimpleNamespace(stdout='main-sha refs/heads/main\n')):
+        with patch.object(nix_cache.subprocess, 'run', return_value=SimpleNamespace(returncode=1)):
             result = self.call(nix_cache.freeze, GITHUB_REF='refs/heads/main', GITHUB_EVENT_NAME='workflow_dispatch', CI_JOB='static', CI_REF_SHA='pr-sha')
         self.assertEqual(result['save'], 'false')
         self.assertIn('not target main', result['reason'])

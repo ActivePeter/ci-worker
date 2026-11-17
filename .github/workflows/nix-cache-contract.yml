@@ -34,5 +34,5 @@ jobs:
           rc=$?
           set -e
           test "$rc" = 1
-          /usr/bin/python3 -I -c 'import json; d=json.load(open("negative.json")); assert d["corrupt_dependency_accepted"] and d["negative_control_reproduced"]'
+          /usr/bin/python3 -I -c 'import json; d=json.loads(open("negative.json").read().splitlines()[-1]); assert d["corrupt_dependency_accepted"] and d["negative_control_reproduced"]'
           cat negative.json
