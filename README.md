@@ -93,5 +93,5 @@ Dynamo/ext及已有store、自托管runner继续原流程。
 覆盖传递依赖污染拒绝、隔离后冷重建、撤掉验证后漏检，以及PR/主线历史写权限。
 同源设计与冷热实测证据：[NIX-GHA-CACHE-D](https://coretokenai.feishu.cn/docx/TpXLdFgKVoYPEsx5VvTc33G7n4g)。
 
-恢复器直接定位 `/nix/store/*-nix-2.35.6/bin/nix` 中已校验安装包留下的bootstrap，
-因此HOME下XDG用户profile未被缓存也能运行。v2缓存键隔离早期profile恢复未命中的试跑。
+保存时记录bootstrap的canonical store/bin/nix路径及二进制SHA256；恢复时核对路径、hash
+和同目录nix-store可执行性，因此HOME下XDG用户profile未被缓存也能运行。v2缓存键隔离早期profile恢复未命中的试跑。

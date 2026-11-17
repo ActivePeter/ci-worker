@@ -51,7 +51,7 @@ def main():
         (meta / 'empty-store-owner').write_text(os.environ['GITHUB_RUN_ID'])
         fingerprint = closure.manifest_fingerprint(manifest)
         metadata = dict(schema=nix_cache.SCHEMA, inputs=nix_cache.inputs(args.src.resolve()),
-                        platform=nix_cache.platform(), manifest=manifest,
+                        platform=nix_cache.platform(), manifest=manifest, bootstrap=nix_cache.bootstrap_record(closure.NIX),
                         fingerprint=fingerprint,
                         store_key=nix_cache.store_key(args.src.resolve(), fingerprint))
         (meta / 'manifest.json').write_text(json.dumps(metadata))
