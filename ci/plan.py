@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import status  # noqa: E402
 
 TARGET_ENTRY = ".github/ci/public-unit.sh"
-MAX_JOBS = 12
+MAX_JOBS = 16
 
 
 def normalize(plan):
