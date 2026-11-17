@@ -67,3 +67,13 @@ python -m ci_worker workers --scheduler http://127.0.0.1:8080
 正常门禁始终为 `ci/public-worker/test-unit`。`poison_host=true` 只污染目标入口子进程，移除提供 rustc 的 PATH 目录，将 python/python3 替换为 exit93，记录 `host-poison.txt`；负对照使用独立的 `ci/public-worker/test-unit-host-poison-<setup>`。concurrency 同时区分 PR/branch、setup 和 poison/clean。prepare 与最终状态回写使用隔离的标准库 Python；matrix/report 作业及其产物步骤任一失败、或必需 report 缺失，都不能回写成功。Dynamo/ext 保持默认 legacy 路线。
 
 本 PR 不修改 main 的仓库变量、分支保护或必需 context，也不切换默认门禁。环境和计量的唯一集成点是 [test#187](https://github.com/goodputai/test/pull/187)，协议见[协调评论](https://github.com/goodputai/test/pull/187#issuecomment-6943572817)；本批吸收 [worker#4](https://github.com/ActivePeter/ci-worker/pull/4) 的选择、dispatch 和负控隔离。只复用每台机器自己的 store，不恢复共享缓存或 nix-serve。main 门禁切到 Nix 仍须先报审。
+
+## dag-panel 公共门禁
+
+ActivePeter/dag-panel 使用 `poll-dag-panel.yml` 每 5 分钟轮询开放的同仓 PR、受保护分支和默认分支，
+由 `run-dag-panel-unit.yml` 调用公共 `unit.yml`，最终回写 **ci/public-worker/dag-panel-unit**。
+测试入口优先取被测提交的 `.github/ci/public-unit.sh`；旧提交使用 `ci/defaults/dag-panel.sh`。
+入口保留 lint、Go race/coverage、smoke、regression、performance、采集与面板检查；
+有 UI1 代码的提交额外运行真实浏览器分页/拖动/触摸验收并上传截图。
+Go 版本读取 go.mod，Node 和 pnpm 版本由目标仓声明；不占 GPU、不部署服务。
+私仓原 GitHub-hosted 任务因计费无法启动时，以此独立 context 的实际回写结果验收。
