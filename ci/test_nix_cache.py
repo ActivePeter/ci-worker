@@ -44,7 +44,7 @@ class CachePolicy(unittest.TestCase):
     def test_keys_include_platform_lock_and_full_frozen_manifest_hash(self):
         with patch.dict(os.environ, RUNNER_OS='Linux', RUNNER_ARCH='X64'), patch.object(nix_cache, 'inputs', return_value={'flake.lock': 'lock-hash'}):
             key = nix_cache.store_key(Path('.'), 'closure-fingerprint')
-        self.assertEqual(key, 'testkit-nix-store-v1-Linux-X64-lock-hash-closure-fingerprint')
+        self.assertEqual(key, 'testkit-nix-store-v2-Linux-X64-lock-hash-closure-fingerprint')
 
     def test_main_history_accepts_merged_sha_and_rejects_pr_or_missing_ref(self):
         from types import SimpleNamespace
@@ -54,6 +54,27 @@ class CachePolicy(unittest.TestCase):
             with patch.dict(os.environ, environment), patch.object(nix_cache.subprocess, 'run', return_value=SimpleNamespace(returncode=rc)) as run:
                 self.assertEqual(nix_cache.writer_allowed(Path('.')), expected)
                 self.assertEqual(run.call_args.args[0], ['git', 'merge-base', '--is-ancestor', 'pinned-main-history-sha', 'refs/remotes/origin/main'])
+
+    def test_restored_store_uses_recorded_payload_without_any_home_profile(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        binary = Path('/nix/store/' + 'a' * 32 + '-nix-2.35.6/bin/nix')
+        closure = SimpleNamespace(store_path=Mock())
+        record = dict(path=str(binary), sha256=__import__('hashlib').sha256(b'payload').hexdigest())
+        files = {binary, binary.with_name('nix-store')}
+        with patch.object(Path, 'home', side_effect=AssertionError('HOME must not be consulted')), patch.object(Path, 'is_file', lambda path: path in files), patch.object(Path, 'read_bytes', return_value=b'payload'), patch.object(os, 'access', lambda path, mode: path in files):
+            self.assertEqual(nix_cache.bind_nix(closure, record), binary)
+        closure.store_path.assert_called_once_with(str(binary.parent.parent))
+        self.assertEqual(closure.NIX_STORE, str(binary.with_name('nix-store')))
+
+    def test_cached_bootstrap_corruption_never_falls_back_to_another_binary(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        binary = Path('/nix/store/' + 'a' * 32 + '-nix-2.35.6/bin/nix')
+        record = dict(path=str(binary), sha256='0' * 64)
+        with patch.object(Path, 'is_file', return_value=True), patch.object(Path, 'read_bytes', return_value=b'corrupt'), patch.object(os, 'access', return_value=True):
+            with self.assertRaisesRegex(ValueError, 'hash mismatch'):
+                nix_cache.bind_nix(SimpleNamespace(store_path=Mock()), record)
 
     def test_default_main_cannot_save_a_pr_sha(self):
         from types import SimpleNamespace

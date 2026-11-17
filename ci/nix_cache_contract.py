@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from unittest.mock import patch
 
 import nix_cache
 
@@ -51,7 +52,7 @@ def main():
         (meta / 'empty-store-owner').write_text(os.environ['GITHUB_RUN_ID'])
         fingerprint = closure.manifest_fingerprint(manifest)
         metadata = dict(schema=nix_cache.SCHEMA, inputs=nix_cache.inputs(args.src.resolve()),
-                        platform=nix_cache.platform(), manifest=manifest,
+                        platform=nix_cache.platform(), manifest=manifest, bootstrap=nix_cache.bootstrap_record(closure.NIX),
                         fingerprint=fingerprint,
                         store_key=nix_cache.store_key(args.src.resolve(), fingerprint))
         (meta / 'manifest.json').write_text(json.dumps(metadata))
@@ -59,7 +60,8 @@ def main():
         if args.mutation:
             nix_cache.verify = lambda *a, **kw: None
         try:
-            restored = nix_cache.check(args.src.resolve(), meta, store=store)
+            with patch.object(Path, 'home', side_effect=AssertionError('restored bootstrap must not consult HOME profiles')):
+                restored = nix_cache.check(args.src.resolve(), meta, store=store)
         finally:
             nix_cache.verify = original
         if restored['state'] != 'rejected-cold' or store.exists():
@@ -71,7 +73,8 @@ def main():
         # an empty location and reconstructs the same frozen input from cold.
         cold = seed(closure, store)
         assert cold == manifest
-        recovered = nix_cache.check(args.src.resolve(), meta, store=store)
+        with patch.object(Path, 'home', side_effect=AssertionError('restored bootstrap must not consult HOME profiles')):
+            recovered = nix_cache.check(args.src.resolve(), meta, store=store)
         assert recovered['state'] == 'hit'
         print(json.dumps(dict(successful=True, corrupt_dependency_rejected=True,
                               cold_recovery_verified=True, requisites=len(manifest['requisites']))))

@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 
-SCHEMA = 'testkit-gha-nix-cache-1'
+SCHEMA = 'testkit-gha-nix-cache-2'
 
 
 def module(src, name):
@@ -54,18 +54,19 @@ def platform():
 
 
 def store_key(src, fingerprint):
-    return f'testkit-nix-store-v1-{platform()}-{inputs(src)["flake.lock"]}-{fingerprint}'
+    return f'testkit-nix-store-v2-{platform()}-{inputs(src)["flake.lock"]}-{fingerprint}'
 
 
 def identity(src, meta):
     meta.mkdir(parents=True, exist_ok=True)
-    emit(index_key=f'testkit-nix-index-v1-{platform()}-{inputs(src)["flake.lock"]}-{digest(inputs(src))}')
+    emit(index_key=f'testkit-nix-index-v2-{platform()}-{inputs(src)["flake.lock"]}-{digest(inputs(src))}')
 
 
 def read(src, meta):
     value = json.loads((meta / 'manifest.json').read_text())
     closure = module(src, 'nix_closure')
     frozen = closure.validate(value['manifest'], frozen=True)
+    bootstrap_path(closure, value['bootstrap'])
     fingerprint = closure.manifest_fingerprint(frozen)
     if (value['schema'] != SCHEMA or value['inputs'] != inputs(src)
             or value['platform'] != platform() or value['fingerprint'] != fingerprint
@@ -90,15 +91,44 @@ def select(src, meta):
     emit(store_key=value['store_key'])
 
 
-def bind_nix(closure):
-    candidates = [Path('/nix/var/nix/profiles/default/bin/nix'), Path.home() / '.nix-profile/bin/nix']
-    candidates += list(Path('/nix/var/nix/profiles/per-user').glob('*/profile/bin/nix'))
+def bootstrap_record(nix):
+    path = Path(nix).resolve()
+    return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+
+def bootstrap_path(closure, bootstrap):
+    if not isinstance(bootstrap, dict) or set(bootstrap) != {'path', 'sha256'}:
+        raise ValueError('invalid cached bootstrap record')
+    candidate = Path(bootstrap['path'])
+    closure.store_path(str(candidate.parent.parent))
+    checksum = bootstrap['sha256']
+    if (candidate.name != 'nix' or candidate.parent.name != 'bin'
+            or not isinstance(checksum, str) or len(checksum) != 64
+            or any(char not in '0123456789abcdef' for char in checksum)):
+        raise ValueError('bootstrap must name a store bin/nix and SHA256')
+    return candidate
+
+
+def bind_nix(closure, bootstrap=None):
+    if bootstrap is not None:
+        candidate = bootstrap_path(closure, bootstrap)
+        if (not candidate.is_file() or not os.access(candidate, os.X_OK)
+                or not candidate.with_name('nix-store').is_file()
+                or not os.access(candidate.with_name('nix-store'), os.X_OK)
+                or hashlib.sha256(candidate.read_bytes()).hexdigest() != bootstrap['sha256']):
+            raise ValueError('cached bootstrap executable/hash mismatch')
+        # A single-user profile lives under HOME's XDG state, outside /nix.
+        # Its recorded canonical payload path survives without any profile link.
+        candidates = [candidate]
+    else:
+        candidates = [Path('/nix/var/nix/profiles/default/bin/nix'), Path.home() / '.nix-profile/bin/nix']
+        candidates += list(Path('/nix/var/nix/profiles/per-user').glob('*/profile/bin/nix'))
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             closure.NIX = str(candidate)
             closure.NIX_STORE = str(candidate.with_name('nix-store'))
             return candidate
-    raise ValueError('restored store has no bootstrap Nix')
+    raise ValueError('store has no bootstrap Nix')
 
 
 def verify(value, closure, *, store=None):
@@ -112,7 +142,7 @@ def check(src, meta, *, store=None):
     state = 'hit'
     try:
         value, closure = read(src, meta)
-        nix = bind_nix(closure)
+        nix = bind_nix(closure, value['bootstrap'])
         verify(value, closure, store=store)
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         # The marker predates restore and is outside /nix. Move only the empty
@@ -171,7 +201,7 @@ def freeze(src, meta):
     fingerprint = closure.manifest_fingerprint(manifest)
     key = store_key(src, fingerprint)
     value = dict(schema=SCHEMA, platform=platform(), inputs=inputs(src), manifest=manifest,
-                 fingerprint=fingerprint, store_key=key, source_sha=main,
+                 fingerprint=fingerprint, store_key=key, source_sha=main, bootstrap=bootstrap_record(nix),
                  closure_nar_bytes=sum(row['nar_size'] for row in manifest['requisites']))
     (meta / 'manifest.json').write_text(json.dumps(value, sort_keys=True, indent=2) + '\n')
     # The /nix archive includes the bootstrap and evaluation sources as well.

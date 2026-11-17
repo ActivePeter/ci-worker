@@ -92,3 +92,6 @@ Dynamo/ext及已有store、自托管runner继续原流程。
 `Nix cache contract` 为独立CI必跑项，真实两路径隔离store直接穿过生产恢复门，
 覆盖传递依赖污染拒绝、隔离后冷重建、撤掉验证后漏检，以及PR/主线历史写权限。
 同源设计与冷热实测证据：[NIX-GHA-CACHE-D](https://coretokenai.feishu.cn/docx/TpXLdFgKVoYPEsx5VvTc33G7n4g)。
+
+保存时记录bootstrap的canonical store/bin/nix路径及二进制SHA256；恢复时核对路径、hash
+和同目录nix-store可执行性，因此HOME下XDG用户profile未被缓存也能运行。v2缓存键隔离早期profile恢复未命中的试跑。
