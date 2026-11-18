@@ -245,8 +245,11 @@ jobs:
           shared-key: ${{ matrix.id }}
           cache-on-failure: true
       - name: Restore verified Nix cache
-        if: inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache
+        if: inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id != 'fresh-container-lifecycle' && matrix.id != 'fresh-nix-daemon'
         uses: ./ciw/.github/actions/nix-cache-restore
+      - name: Record cache exclusion for daemon lifecycle
+        if: inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && (matrix.id == 'fresh-container-lifecycle' || matrix.id == 'fresh-nix-daemon')
+        run: echo '{"state":"skipped","reason":"requires a clean multi-user Nix daemon install"}' | tee "$CI_OUT/nix-cache-restore.json"
       - name: Download shared inputs
         if: matrix.shared
         uses: actions/download-artifact@v4

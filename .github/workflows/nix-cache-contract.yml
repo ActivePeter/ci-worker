@@ -2,6 +2,11 @@ name: Nix cache contract
 on:
   pull_request:
   workflow_dispatch:
+    inputs:
+      prime_w1:
+        description: Prime the branch-local W1 proof cache from a testkit main pin
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -66,3 +71,31 @@ jobs:
           grep -F 'Nix tool nix-store not found' negative.json
           /usr/bin/python3 -I -c 'import json; d=json.loads(open("negative.json").read().splitlines()[-1]); assert d["state"] == "rejected-cold", d'
           cat negative.json
+
+  prime-w1:
+    if: github.event_name == 'workflow_dispatch' && inputs.prime_w1 && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CI_JOB: static
+      CI_REF_SHA: fd65a4e6398702caf0eaab1a1662928615ce950b
+      TESTKIT_NIX_CACHE_BRANCH_PROOF: '1'
+      TEST_UNIT_SETUP: nix
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ciw
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: goodputai/test
+          ref: ${{ env.CI_REF_SHA }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          fetch-depth: 0
+          path: src
+          persist-credentials: false
+      - name: Prepare a real Nix environment for the branch cache
+        working-directory: src
+        run: bash nix/ci.sh setup
+      - name: Publish the branch-local proof cache
+        uses: ./ciw/.github/actions/nix-cache-save

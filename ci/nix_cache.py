@@ -177,9 +177,12 @@ def check(src, meta, *, store=None):
 
 
 def writer_allowed(src):
-    if (os.environ.get('GITHUB_REF') != 'refs/heads/main'
-            or os.environ.get('GITHUB_EVENT_NAME') == 'pull_request'
-            or os.environ.get('CI_JOB') != 'static'):
+    ref = os.environ.get('GITHUB_REF', '')
+    event = os.environ.get('GITHUB_EVENT_NAME')
+    proof = (os.environ.get('TESTKIT_NIX_CACHE_BRANCH_PROOF') == '1'
+             and event == 'workflow_dispatch' and ref.startswith('refs/heads/'))
+    if ((ref != 'refs/heads/main' and not proof)
+            or event == 'pull_request' or os.environ.get('CI_JOB') != 'static'):
         return False
     # static has fetch-depth: 0. A later merge must not invalidate a pinned
     # main-SHA benchmark, while an unmerged PR SHA must remain read-only.
@@ -199,6 +202,7 @@ def freeze(src, meta):
     main = os.environ['CI_REF_SHA']
     closure = module(src, 'nix_closure')
     nix = bind_nix(closure)
+    meta.mkdir(parents=True, exist_ok=True)
     profile = meta / 'environment'
     subprocess.run([str(nix), *closure.NIX_FEATURES, 'print-dev-env', '--no-update-lock-file',
                     '--profile', str(profile), '--json', str(src)], check=True,
