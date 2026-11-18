@@ -4,6 +4,7 @@ Only an empty, ephemeral hosted store can be restored. A rejected restored
 store is quarantined so the existing target setup performs a real cold install.
 """
 import argparse
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import json
@@ -14,7 +15,7 @@ import sys
 import time
 import uuid
 
-SCHEMA = 'testkit-gha-nix-cache-2'
+SCHEMA = 'testkit-gha-nix-cache-3'
 
 
 def module(src, name):
@@ -22,10 +23,6 @@ def module(src, name):
     value = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(value)
     return value
-
-
-def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 def inputs(src):
@@ -53,13 +50,8 @@ def platform():
     return os.environ['RUNNER_OS'] + '-' + os.environ['RUNNER_ARCH']
 
 
-def store_key(src, fingerprint):
-    return f'testkit-nix-store-v2-{platform()}-{inputs(src)["flake.lock"]}-{fingerprint}'
-
-
-def identity(src, meta):
-    meta.mkdir(parents=True, exist_ok=True)
-    emit(index_key=f'testkit-nix-index-v2-{platform()}-{inputs(src)["flake.lock"]}-{digest(inputs(src))}')
+def store_key(src):
+    return f'testkit-nix-store-v3-{platform()}-{inputs(src)["flake.lock"]}'
 
 
 def read(src, meta):
@@ -68,9 +60,9 @@ def read(src, meta):
     frozen = closure.validate(value['manifest'], frozen=True)
     bootstrap_path(closure, value['bootstrap'])
     fingerprint = closure.manifest_fingerprint(frozen)
-    if (value['schema'] != SCHEMA or value['inputs'] != inputs(src)
+    if (value['schema'] != SCHEMA or value['inputs']['flake.lock'] != inputs(src)['flake.lock']
             or value['platform'] != platform() or value['fingerprint'] != fingerprint
-            or value['store_key'] != store_key(src, fingerprint)):
+            or value['store_key'] != store_key(src)):
         raise ValueError('cached frozen manifest/inputs/key mismatch')
     return value, closure
 
@@ -80,15 +72,16 @@ def select(src, meta):
     if os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted' or Path('/nix/var/nix/db/db.sqlite').exists():
         emit(store_key='', reason='existing or non-hosted store; normal target setup')
         return
-    try:
-        value, _ = read(src, meta)
-    except (OSError, ValueError, KeyError, TypeError) as error:
-        emit(store_key='', reason=f'index miss/rejected: {error}')
-        return
+    meta.mkdir(parents=True, exist_ok=True)
+    # Restore the archive and its manifest in one cache entry so concurrent
+    # savers cannot publish metadata for another writer's store.
     subprocess.run(['sudo', 'mkdir', '-p', '/nix'], check=True)
+    if any(Path('/nix').iterdir()):
+        emit(store_key='', reason='existing Nix directory; normal target setup')
+        return
     subprocess.run(['sudo', 'chown', str(os.getuid()), '/nix'], check=True)
     (meta / 'empty-store-owner').write_text(os.environ['GITHUB_RUN_ID'])
-    emit(store_key=value['store_key'])
+    emit(store_key=store_key(src))
 
 
 def bootstrap_record(nix):
@@ -131,6 +124,19 @@ def bind_nix(closure, bootstrap=None):
     raise ValueError('store has no bootstrap Nix')
 
 
+@contextmanager
+def bootstrap_tools(nix):
+    old_path = os.environ.get('PATH')
+    os.environ['PATH'] = os.pathsep.join(filter(None, (str(nix.parent), old_path)))
+    try:
+        yield
+    finally:
+        if old_path is None:
+            os.environ.pop('PATH', None)
+        else:
+            os.environ['PATH'] = old_path
+
+
 def verify(value, closure, *, store=None):
     # This must stay on the restore path. Metadata equality alone misses changed
     # bytes in a transitive dependency whose root and DB still look unchanged.
@@ -139,29 +145,29 @@ def verify(value, closure, *, store=None):
 
 def check(src, meta, *, store=None):
     started = time.monotonic()
-    state = 'hit'
-    try:
-        value, closure = read(src, meta)
-        nix = bind_nix(closure, value['bootstrap'])
-        verify(value, closure, store=store)
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-        # The marker predates restore and is outside /nix. Move only the empty
-        # hosted store this action owns; retain its bytes for diagnostics.
-        marker = meta / 'empty-store-owner'
-        if (os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
-                or not marker.is_file() or marker.read_text() != os.environ['GITHUB_RUN_ID']):
-            raise RuntimeError('cannot quarantine a store this run does not own') from error
-        source = Path('/nix') if store is None else Path(store)
-        quarantine = source.with_name(source.name + '-cache-rejected-' + uuid.uuid4().hex)
-        if store is None:
-            subprocess.run(['sudo', 'mv', str(source), str(quarantine)], check=True)
+    source = Path('/nix') if store is None else Path(store)
+    state = 'miss'
+    if (meta / 'manifest.json').exists() or any(source.iterdir()):
+        try:
+            value, closure = read(src, meta)
+            nix = bind_nix(closure, value['bootstrap'])
+            with bootstrap_tools(nix):
+                verify(value, closure, store=store)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            marker = meta / 'empty-store-owner'
+            if (os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
+                    or not marker.is_file() or marker.read_text() != os.environ['GITHUB_RUN_ID']):
+                raise RuntimeError('cannot quarantine a store this run does not own') from error
+            quarantine = source.with_name(source.name + '-cache-rejected-' + uuid.uuid4().hex)
+            if store is None:
+                subprocess.run(['/usr/bin/sudo', 'mv', str(source), str(quarantine)], check=True)
+            else:
+                source.rename(quarantine)
+            state = 'rejected-cold'
+            print(f'::warning::Nix cache rejected; cold target setup follows: {error}; quarantine={quarantine}')
         else:
-            # Internal integration seam only; the CLI never accepts this option.
-            source.rename(quarantine)
-        state = 'rejected-cold'
-        print(f'::warning::Nix cache rejected; cold target setup follows: {error}; quarantine={quarantine}')
-    else:
-        env(TESTKIT_NIX_BIN=str(nix))
+            state = 'hit'
+            env(TESTKIT_NIX_BIN=str(nix))
     env(TESTKIT_NIX_CACHE_STATE=state)
     record = dict(state=state, verify_seconds=time.monotonic() - started)
     output = Path(os.environ['CI_OUT']); output.mkdir(parents=True, exist_ok=True)
@@ -197,9 +203,10 @@ def freeze(src, meta):
     subprocess.run([str(nix), *closure.NIX_FEATURES, 'print-dev-env', '--no-update-lock-file',
                     '--profile', str(profile), '--json', str(src)], check=True,
                    stdout=subprocess.DEVNULL, timeout=180)
-    manifest = closure.freeze_record(dict(kind='nix_store', store_path=str(profile.resolve())))
+    with bootstrap_tools(nix):
+        manifest = closure.freeze_record(dict(kind='nix_store', store_path=str(profile.resolve())))
     fingerprint = closure.manifest_fingerprint(manifest)
-    key = store_key(src, fingerprint)
+    key = store_key(src)
     value = dict(schema=SCHEMA, platform=platform(), inputs=inputs(src), manifest=manifest,
                  fingerprint=fingerprint, store_key=key, source_sha=main, bootstrap=bootstrap_record(nix),
                  closure_nar_bytes=sum(row['nar_size'] for row in manifest['requisites']))
@@ -219,7 +226,7 @@ def freeze(src, meta):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['identity', 'select', 'check', 'freeze'])
+    parser.add_argument('command', choices=['select', 'check', 'freeze'])
     parser.add_argument('--src', type=Path, required=True)
     parser.add_argument('--meta', type=Path, required=True)
     args = parser.parse_args()

@@ -255,7 +255,12 @@ jobs:
           path: ${{ env.CI_SHARED }}
       - name: setup ${{ matrix.id }}
         working-directory: src
-        run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
+        run: |
+          if [[ "$CI_JOB" == static && "${{ inputs.repo }}" == goodputai/test && "$TEST_UNIT_SETUP" == nix && "${{ inputs.test_nix_cache }}" == true ]]; then
+            TEST_UNIT_SETUP=nix bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
+          else
+            bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
+          fi
       - name: run ${{ matrix.id }}
         working-directory: src
         run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
