@@ -21,17 +21,26 @@ MAX_JOBS = 32
 def normalize(plan):
     if plan.get("version") != 1:
         raise ValueError("plan.version must be 1")
-    jobs, seen = [], set()
+    jobs, seen, suites = [], set(), set()
     for job in plan.get("jobs", []):
         ident = str(job.get("id", ""))
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", ident) or ident in seen or ident == "report":
             raise ValueError(f"bad or duplicate job id {ident!r}")
         seen.add(ident)
+        verification = job.get("verification")
+        if verification is not None:
+            if (not isinstance(verification, dict) or set(verification) != {"namespace", "suite"}
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", str(verification["namespace"]))
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", str(verification["suite"]))
+                    or verification["suite"] in suites or not job.get("shared") or not plan.get("report")):
+                raise ValueError(f"invalid verification plan for {ident!r}")
+            suites.add(verification["suite"])
         jobs.append({
             "id": ident,
             "timeout": max(1, min(int(job.get("timeout", 20)), 60)),
             "python": str(job.get("python", "")),
             "shared": bool(job.get("shared", False)),
+            "verification": verification,
             "rust_cache": bool(job.get("rust_cache", False)),
             "go": bool(job.get("go", False)),
             "go_version": str(job.get("go_version", "")),

@@ -24,6 +24,10 @@ on:
         description: "Negative control: remove host rustc and replace host Python"
         type: boolean
         default: false
+      verify_always:
+        description: "Execute all suites even if an exact verification marker exists"
+        type: boolean
+        default: false
   repository_dispatch:
     types: [run-test-unit]
 
@@ -44,6 +48,7 @@ jobs:
       test_setup: ${{ github.event.client_payload.setup || github.event.inputs.setup || vars.TEST_UNIT_SETUP || 'legacy' }}
       test_nix_cache: ${{ (github.event.client_payload.nix_cache || (github.event.inputs.nix_cache != 'auto' && github.event.inputs.nix_cache) || vars.TEST_UNIT_NIX_CACHE || 'off') == 'on' }}
       test_poison_host: ${{ github.event.client_payload.poison_host == true || github.event.inputs.poison_host == 'true' }}
+      verify_always: ${{ github.event.inputs.verify_always == 'true' }}
       ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
     secrets:
       GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}

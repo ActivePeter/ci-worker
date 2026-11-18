@@ -39,6 +39,9 @@ on:
       test_poison_host:
         type: boolean
         default: false
+      verify_always:
+        type: boolean
+        default: false
     secrets:
       GIE_GIT_TOKEN:
         required: true
@@ -92,6 +95,8 @@ jobs:
     name: ${{ fromJSON(needs.prepare.outputs.shared || '{}').id || 'shared' }}
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ fromJSON(needs.prepare.outputs.shared || '{}').timeout || 60 }}
+    outputs:
+      verification_fingerprint: ${{ steps.produce.outputs.verification_fingerprint }}
     env:
       TEST_UNIT_SETUP: ${{ inputs.test_setup }}
       TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
@@ -139,6 +144,7 @@ jobs:
           path: ${{ env.CI_SHARED }}
           key: ciw-shared-v1-${{ inputs.repo }}-${{ steps.setup.outputs.cache_key }}
       - name: Prepare and verify shared inputs
+        id: produce
         working-directory: src
         run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
       - name: Save target-owned shared inputs
@@ -192,7 +198,40 @@ jobs:
         with:
           path: ciw
           persist-credentials: false
+      - name: Verification marker key
+        id: verification
+        if: matrix.verification && !inputs.verify_always && !inputs.test_poison_host
+        env:
+          VERIFICATION_FINGERPRINT: ${{ needs.shared.outputs.verification_fingerprint }}
+          VERIFICATION_PLAN: ${{ toJSON(matrix.verification) }}
+        run: /usr/bin/python3 -I ciw/ci/verification.py key
+      - name: Look up verified fingerprint
+        id: verification-lookup
+        continue-on-error: true
+        if: steps.verification.outputs.key != ''
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ci-verified/${{ matrix.verification.suite }}/result.json
+          key: ${{ steps.verification.outputs.key }}
+          lookup-only: true
+      - name: Read verification receipt
+        id: verification-read
+        continue-on-error: true
+        if: steps.verification-lookup.outputs.cache-hit == 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ci-verified/${{ matrix.verification.suite }}/result.json
+          key: ${{ steps.verification.outputs.key }}
+      - name: Record verified skip
+        id: verified
+        if: steps.verification-read.outputs.cache-hit == 'true'
+        env:
+          VERIFICATION_FINGERPRINT: ${{ needs.shared.outputs.verification_fingerprint }}
+          VERIFICATION_PLAN: ${{ toJSON(matrix.verification) }}
+          VERIFICATION_MARKER: ${{ runner.temp }}/ci-verified/${{ matrix.verification.suite }}/result.json
+        run: /usr/bin/python3 -I ciw/ci/verification.py skip
       - uses: actions/checkout@v4
+        if: steps.verified.outputs.skip != 'true'
         with:
           repository: ${{ inputs.repo }}
           ref: ${{ needs.prepare.outputs.sha }}
@@ -201,6 +240,7 @@ jobs:
           persist-credentials: false
           fetch-depth: ${{ matrix.fetch_depth }}
       - name: Configure goodputai git access
+        if: steps.verified.outputs.skip != 'true'
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
         run: |
@@ -212,51 +252,52 @@ jobs:
             echo "ENTRY=$GITHUB_WORKSPACE/ciw/${{ inputs.default_entry }}" >> "$GITHUB_ENV"
           fi
       - uses: actions/setup-go@v5
-        if: matrix.go
+        if: steps.verified.outputs.skip != 'true' && matrix.go
         with:
           go-version: ${{ matrix.go_version }}
           go-version-file: src/go.mod
           cache-dependency-path: src/go.sum
       - uses: actions/setup-node@v4
-        if: matrix.node != ''
+        if: steps.verified.outputs.skip != 'true' && matrix.node != ''
         with:
           node-version: ${{ matrix.node }}
       - uses: pnpm/action-setup@v4
-        if: matrix.pnpm != ''
+        if: steps.verified.outputs.skip != 'true' && matrix.pnpm != ''
         with:
           version: ${{ matrix.pnpm }}
       - uses: astral-sh/setup-uv@v6
-        if: inputs.test_setup != 'nix'
+        if: steps.verified.outputs.skip != 'true' && inputs.test_setup != 'nix'
         with:
           enable-cache: false
       - uses: actions/setup-python@v5
-        if: inputs.test_setup != 'nix' && matrix.python != ''
+        if: steps.verified.outputs.skip != 'true' && inputs.test_setup != 'nix' && matrix.python != ''
         with:
           python-version: ${{ matrix.python }}
       - name: Select Rust toolchain
-        if: inputs.test_setup != 'nix' && matrix.rust_cache
+        if: steps.verified.outputs.skip != 'true' && inputs.test_setup != 'nix' && matrix.rust_cache
         working-directory: src
         run: rustup show active-toolchain || rustup show
       - uses: Swatinem/rust-cache@v2
-        if: inputs.test_setup != 'nix' && matrix.rust_cache
+        if: steps.verified.outputs.skip != 'true' && inputs.test_setup != 'nix' && matrix.rust_cache
         with:
           workspaces: src
           prefix-key: v1-${{ inputs.repo }}
           shared-key: ${{ matrix.id }}
           cache-on-failure: true
       - name: Restore verified Nix cache
-        if: inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id != 'fresh-container-lifecycle' && matrix.id != 'fresh-nix-daemon'
+        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id != 'fresh-container-lifecycle' && matrix.id != 'fresh-nix-daemon'
         uses: ./ciw/.github/actions/nix-cache-restore
       - name: Record cache exclusion for daemon lifecycle
-        if: inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && (matrix.id == 'fresh-container-lifecycle' || matrix.id == 'fresh-nix-daemon')
+        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && (matrix.id == 'fresh-container-lifecycle' || matrix.id == 'fresh-nix-daemon')
         run: echo '{"state":"skipped","reason":"requires a clean multi-user Nix daemon install"}' | tee "$CI_OUT/nix-cache-restore.json"
       - name: Download shared inputs
-        if: matrix.shared
+        if: steps.verified.outputs.skip != 'true' && matrix.shared
         uses: actions/download-artifact@v4
         with:
           name: shared-inputs
           path: ${{ env.CI_SHARED }}
       - name: setup ${{ matrix.id }}
+        if: steps.verified.outputs.skip != 'true'
         working-directory: src
         run: |
           if [[ "$CI_JOB" == static && "${{ inputs.repo }}" == goodputai/test && "$TEST_UNIT_SETUP" == nix && "${{ inputs.test_nix_cache }}" == true ]]; then
@@ -265,10 +306,11 @@ jobs:
             bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
           fi
       - name: run ${{ matrix.id }}
+        if: steps.verified.outputs.skip != 'true'
         working-directory: src
         run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
       - name: Save Nix cache (main static job only)
-        if: inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id == 'static' && github.ref == 'refs/heads/main'
+        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id == 'static' && github.ref == 'refs/heads/main'
         uses: ./ciw/.github/actions/nix-cache-save
       - name: Record job result
         if: always()
@@ -287,6 +329,8 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      verified_markers: ${{ steps.markers.outputs.markers }}
     env:
       TEST_UNIT_SETUP: ${{ inputs.test_setup }}
       TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
@@ -342,6 +386,22 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+      - name: Prepare pass markers from audited real results
+        id: markers
+        if: needs.run.result == 'success' && steps.entry.outputs.rc == '0' && needs.shared.outputs.verification_fingerprint != '' && !inputs.test_poison_host
+        env:
+          JOBS: ${{ needs.prepare.outputs.report_jobs }}
+          VERIFICATION_FINGERPRINT: ${{ needs.shared.outputs.verification_fingerprint }}
+          VERIFICATION_ROOT: ${{ runner.temp }}/ci-verified
+        run: /usr/bin/python3 -I ciw/ci/verification.py publish
+      - name: Upload only small verification receipts
+        if: steps.markers.outputs.markers != '' && steps.markers.outputs.markers != '[]'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-markers
+          path: ${{ runner.temp }}/ci-verified
+          if-no-files-found: error
+          retention-days: 1
       - name: Final status (only writer)
         if: always()
         env:
@@ -356,3 +416,24 @@ jobs:
           REPORT_JOB_RESULT: ${{ job.status }}
           REPORT_RC: ${{ needs.prepare.outputs.report == 'true' && (steps.entry.outputs.rc || 'missing') || '' }}
         run: /usr/bin/python3 -I ciw/ci/report.py
+
+
+  save-verification:
+    needs: report
+    if: needs.report.result == 'success' && needs.report.outputs.verified_markers != '' && needs.report.outputs.verified_markers != '[]'
+    name: save-verification / ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.report.outputs.verified_markers) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: verification-markers
+          path: ${{ runner.temp }}/ci-verified
+      - uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ci-verified/${{ matrix.suite }}/result.json
+          key: ${{ matrix.key }}
