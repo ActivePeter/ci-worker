@@ -41,10 +41,13 @@ class CachePolicy(unittest.TestCase):
         nix_cache.verify(value, closure, store='/isolated')
         closure.verify.assert_called_once_with(value['manifest'], store='/isolated')
 
-    def test_keys_include_platform_lock_and_full_frozen_manifest_hash(self):
+    def test_same_platform_and_lock_use_one_key(self):
         with patch.dict(os.environ, RUNNER_OS='Linux', RUNNER_ARCH='X64'), patch.object(nix_cache, 'inputs', return_value={'flake.lock': 'lock-hash'}):
-            key = nix_cache.store_key(Path('.'), 'closure-fingerprint')
-        self.assertEqual(key, 'testkit-nix-store-v2-Linux-X64-lock-hash-closure-fingerprint')
+            key = nix_cache.store_key(Path('.'))
+        with patch.dict(os.environ, RUNNER_OS='Linux', RUNNER_ARCH='X64'), patch.object(
+                nix_cache, 'inputs', return_value={'flake.lock': 'lock-hash', 'flake.nix': 'changed'}):
+            self.assertEqual(nix_cache.store_key(Path('.')), key)
+        self.assertEqual(key, 'testkit-nix-store-v3-Linux-X64-lock-hash')
 
     def test_main_history_accepts_merged_sha_and_rejects_pr_or_missing_ref(self):
         from types import SimpleNamespace

@@ -4,6 +4,7 @@
 All store writes are in two TemporaryDirectory stores, never the runner store.
 """
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -24,10 +25,35 @@ def seed(closure, store):
                 requisites=closure.path_info(root, store=store))
 
 
+def isolated_bootstrap(args, closure, parent, store, manifest):
+    source = args.src.resolve()
+    meta = parent / 'order'; meta.mkdir()
+    bootstrap = nix_cache.bootstrap_record(closure.NIX)
+    identity = {'RUNNER_OS': 'Linux', 'RUNNER_ARCH': 'X64', 'GITHUB_RUN_ID': 'bootstrap-order',
+                'RUNNER_ENVIRONMENT': 'github-hosted', 'CI_OUT': str(parent / 'out')}
+    load = nix_cache.module
+    with patch.dict(os.environ, identity):
+        (meta / 'empty-store-owner').write_text(identity['GITHUB_RUN_ID'])
+        metadata = dict(schema=nix_cache.SCHEMA, inputs=nix_cache.inputs(source),
+                        platform=nix_cache.platform(), manifest=manifest, bootstrap=bootstrap,
+                        fingerprint=closure.manifest_fingerprint(manifest), store_key=nix_cache.store_key(source))
+        (meta / 'manifest.json').write_text(json.dumps(metadata))
+        with patch.dict(os.environ, PATH=str(parent / 'empty-path')), \
+                patch.object(closure, 'PROFILE_BIN', parent / 'missing-profile'), \
+                patch.object(nix_cache, 'module', side_effect=lambda src, name: closure if name == 'nix_closure' else load(src, name)), \
+                (patch.object(nix_cache, 'bootstrap_tools', lambda _nix: nullcontext())
+                 if args.mutation == 'unbound-bootstrap' else nullcontext()):
+            checked = nix_cache.check(source, meta, store=store)
+    assert checked['state'] in {'hit', 'rejected-cold'}, checked
+    assert store.exists() == (checked['state'] == 'hit'), checked
+    return checked
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--src', type=Path, required=True)
-    parser.add_argument('--mutation', choices=['skip-verify'])
+    parser.add_argument('--mutation', choices=['skip-verify', 'unbound-bootstrap'])
+    parser.add_argument('--bootstrap-order', action='store_true')
     args = parser.parse_args()
     closure = nix_cache.module(args.src.resolve(), 'nix_closure')
     nix_cache.bind_nix(closure)
@@ -37,6 +63,9 @@ def main():
         manifest = seed(closure, store)
         value = dict(manifest=manifest)
         nix_cache.verify(value, closure, store=store)
+        if args.bootstrap_order:
+            checked = isolated_bootstrap(args, closure, parent, store, manifest)
+            return int(checked['state'] != 'hit')
         dependency = next(row['path'] for row in manifest['requisites'] if row['path'].endswith('-ci-cache-dependency'))
         physical = store / dependency.lstrip('/')
         physical.chmod(0o644)
@@ -54,7 +83,7 @@ def main():
         metadata = dict(schema=nix_cache.SCHEMA, inputs=nix_cache.inputs(args.src.resolve()),
                         platform=nix_cache.platform(), manifest=manifest, bootstrap=nix_cache.bootstrap_record(closure.NIX),
                         fingerprint=fingerprint,
-                        store_key=nix_cache.store_key(args.src.resolve(), fingerprint))
+                        store_key=nix_cache.store_key(args.src.resolve()))
         (meta / 'manifest.json').write_text(json.dumps(metadata))
         original = nix_cache.verify
         if args.mutation:
