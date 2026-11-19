@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
+import affected  # noqa: E402
 import status  # noqa: E402
 
 TARGET_ENTRY = ".github/ci/public-unit.sh"
@@ -40,6 +41,9 @@ def normalize(plan):
             "timeout": max(1, min(int(job.get("timeout", 20)), 60)),
             "python": str(job.get("python", "")),
             "shared": bool(job.get("shared", False)),
+            # Revisions predating the catalog provided these two lifecycle jobs implicitly.
+            "clean_nix_daemon": bool(job.get("clean_nix_daemon", ident in
+                                       ("fresh-container-lifecycle", "fresh-nix-daemon"))),
             "verification": verification,
             "rust_cache": bool(job.get("rust_cache", False)),
             "go": bool(job.get("go", False)),
@@ -71,26 +75,55 @@ def main():
     src, ciw = Path(os.environ["SRC"]), Path(os.environ["CIW"])
     repo, context = os.environ["REPO"], os.environ["CONTEXT"]
     sha = subprocess.check_output(["git", "-C", str(src), "rev-parse", "HEAD"], text=True).strip()
-    out = open(os.environ["GITHUB_OUTPUT"], "a")
-    out.write(f"sha={sha}\n")
     if (src / TARGET_ENTRY).is_file():
         kind, entry = "target", (src / TARGET_ENTRY).resolve()
     else:
         kind, entry = "legacy", (ciw / os.environ["DEFAULT_ENTRY"]).resolve()
-    out.write(f"kind={kind}\nentry={entry}\n")
-    out.flush()
+    output = Path(os.environ["GITHUB_OUTPUT"])
+    with output.open("a") as out:
+        out.write(f"sha={sha}\nkind={kind}\nentry={entry}\n")
+    selection_dir = Path(os.environ.get("CI_PLAN_DIRECTORY", str(src.resolve() / ".ci-plan")))
+    selection_dir.mkdir(parents=True, exist_ok=True)
+    requested_base = affected.requested_base(
+        os.environ.get("GITHUB_EVENT_NAME", ""), os.environ.get("CI_REQUEST_SOURCE", ""),
+        os.environ.get("CI_REQUEST_GROUP", ""), os.environ.get("CI_REQUEST_REF", ""),
+        os.environ.get("CI_AFFECTED_BASE", ""),
+    )
+    base, paths = affected.changed_paths(src, requested_base, sha)
+    full_run = repo == "goodputai/test" and paths is None
+
+    changes = selection_dir / "changes.json"
+    changes.write_text(json.dumps(paths) + "\n")
     try:
-        text = subprocess.check_output(["bash", str(entry), "plan"], cwd=src, text=True, timeout=120)
+        environment = {**os.environ, "CI_AFFECTED_CHANGES": str(changes.resolve())}
+        environment.pop("CI_ARTIFACT_TOKEN", None)
+        text = subprocess.check_output(["bash", str(entry), "plan"], cwd=src, text=True, timeout=120, env=environment)
         plan = json.loads(text)
         jobs, report = normalize(plan)
         shared = normalize_shared(plan)
+        use_affected = repo == "goodputai/test" and isinstance(plan.get("affected"), dict)
+        if use_affected:
+            if plan["affected"].get("changed") != paths:
+                raise ValueError("target plan did not use the prepared change set")
+            verify_always = full_run or os.environ.get("CI_VERIFY_ALWAYS") == "true"
+            jobs, fingerprint, verified = affected.prune(src, jobs, sha, plan["affected"], verify_always)
+            if not any(job["shared"] for job in jobs):
+                shared = None
+            evidence = dict(head=sha, base=base, changed=paths, affected=plan["affected"],
+                            jobs=[job["id"] for job in jobs], fingerprint=fingerprint, verified=verified)
+            (selection_dir / "selection.json").write_text(json.dumps(evidence, sort_keys=True) + "\n")
+
     except Exception as error:
         print(f"::error::plan failed ({kind} entry {entry}): {error}")
         raise SystemExit(1)
-    out.write(f"jobs={json.dumps(jobs, separators=(',', ':'))}\nreport={'true' if report else 'false'}\n")
     report_jobs = ([shared] if shared else []) + jobs
-    out.write(f"shared={json.dumps(shared, separators=(',', ':')) if shared else ''}\n")
-    out.write(f"report_jobs={json.dumps(report_jobs, separators=(',', ':'))}\n")
+    with output.open("a") as out:
+        out.write(f"full_run={'true' if full_run else 'false'}\n")
+        if use_affected:
+            out.write(f"affected=true\naffected_base={base or ''}\n")
+        out.write(f"jobs={json.dumps(jobs, separators=(',', ':'))}\nreport={'true' if report else 'false'}\n")
+        out.write(f"shared={json.dumps(shared, separators=(',', ':')) if shared else ''}\n")
+        out.write(f"report_jobs={json.dumps(report_jobs, separators=(',', ':'))}\n")
     names = ", ".join(job["id"] for job in report_jobs)
     print(f"{kind} entry {entry}: {len(jobs)} jobs [{names}] report={report}")
     label = "legacy default · " if kind == "legacy" else ""

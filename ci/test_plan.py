@@ -1,6 +1,13 @@
 """Guard the entry plan sanity limit independently of runner capacity."""
+import json
+import os
+from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+import plan as worker_plan
 from plan import normalize, normalize_shared
 
 
@@ -43,6 +50,66 @@ class SharedPreparation(unittest.TestCase):
         for record in (False, [], {}, {"id": "inputs", "run": "echo unsupported"}):
             with self.subTest(record=record), self.assertRaises(ValueError):
                 normalize_shared({"version": 1, "shared": record, "jobs": [{"id": "test"}]})
+
+
+class FullRequest(unittest.TestCase):
+    def test_main_and_scheduled_requests_keep_all_33_jobs_even_with_a_pr_base(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(['git', 'init', '-q', str(root)], check=True)
+            subprocess.run(['git', '-C', str(root), '-c', 'user.name=Fixture', '-c',
+                            'user.email=ci@example.invalid', 'commit', '--allow-empty', '-qm', 'initial'],
+                           check=True)
+            head = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
+            entry = root / worker_plan.TARGET_ENTRY
+            entry.parent.mkdir(parents=True)
+            entry.touch()
+            suite = dict(id='rust-job', shared=True,
+                         verification=dict(namespace='rust-verified-v1', suite='cache'))
+            out = root / 'output'
+
+            def target_plan(_command, *, env, **_kwargs):
+                changed = json.loads(Path(env['CI_AFFECTED_CHANGES']).read_text())
+                jobs = [suite] + [dict(id=f'case-{i}') for i in range(29)]
+                return json.dumps(dict(version=1, jobs=jobs if changed is None else [suite],
+                                       report=True, shared=dict(id='shared'),
+                                       affected=dict(changed=changed)))
+
+            subprocess_output = subprocess.check_output
+
+            def local_output(cmd, **kwargs):
+                if cmd[0] == 'bash':
+                    return target_plan(cmd, **kwargs)
+                return subprocess_output(cmd, **kwargs)
+
+            scenarios = (
+                ('push', 'poll', 'pr-42', head),
+                ('repository_dispatch', 'poll', 'branch-main', head),
+                ('repository_dispatch', 'poll', 'pr-42', 'refs/heads/main'),
+                ('schedule', 'poll', 'pr-42', head),
+                ('repository_dispatch', 'schedule', 'pr-42', head),
+                ('workflow_dispatch', 'poll', 'pr-42', head),
+            )
+            for event, source, group, ref in scenarios:
+                with self.subTest(event=event, source=source, group=group, ref=ref):
+                    out.write_text('')
+                    env = dict(SRC=str(root), CIW=str(root), REPO='goodputai/test', CONTEXT='local',
+                               GITHUB_OUTPUT=str(out), GITHUB_EVENT_NAME=event, CI_REQUEST_SOURCE=source,
+                               CI_REQUEST_GROUP=group, CI_REQUEST_REF=ref, CI_AFFECTED_BASE=head)
+                    with (patch.dict(os.environ, env), patch.object(worker_plan.status, 'post'),
+                          patch.object(worker_plan.status, 'run_url', return_value='local'),
+                          patch.object(worker_plan.subprocess, 'check_output', side_effect=local_output),
+                          patch.object(worker_plan.affected, 'fingerprint') as fingerprint,
+                          patch.object(worker_plan.affected, 'find_markers') as markers):
+                        worker_plan.main()
+                    outputs = dict(line.split('=', 1) for line in out.read_text().splitlines())
+                    jobs = json.loads(outputs['jobs'])
+                    self.assertEqual(outputs['full_run'], 'true')
+                    self.assertEqual(outputs['affected_base'], '')
+                    self.assertEqual(len(jobs) + bool(outputs['shared']) + 2, 33)
+                    self.assertIn('rust-job', {job['id'] for job in jobs})
+                    fingerprint.assert_not_called()
+                    markers.assert_not_called()
 
 
 if __name__ == "__main__":
