@@ -3,7 +3,7 @@ name: unit
 # Reusable job DAG behind run-*-unit:
 #   prepare (checkout, resolve SHA, ask the entry script for its plan, pending)
 #     -> run[matrix: one job per planned id, all in parallel]
-#     -> report (needs everything; the only writer of the final status).
+#     -> report (needs everything; writes the final status for completed runs).
 #
 # Entry script contract (.github/ci/public-unit.sh in the tested SHA; falls back
 # to ci-worker's ci/defaults/<repo>.sh, reported as "legacy default"):
@@ -326,7 +326,8 @@ jobs:
 
   report:
     needs: [prepare, shared, run]
-    if: always()
+    # Report failures, but release the concurrency group when a run is superseded.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -402,8 +403,8 @@ jobs:
           path: ${{ runner.temp }}/ci-verified
           if-no-files-found: error
           retention-days: 1
-      - name: Final status (only writer)
-        if: always()
+      - name: Final status
+        if: ${{ !cancelled() }}
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
           REPO: ${{ inputs.repo }}
@@ -416,6 +417,29 @@ jobs:
           REPORT_JOB_RESULT: ${{ job.status }}
           REPORT_RC: ${{ needs.prepare.outputs.report == 'true' && (steps.entry.outputs.rc || 'missing') || '' }}
         run: /usr/bin/python3 -I ciw/ci/report.py
+
+
+  cancelled-status:
+    needs: [prepare, report]
+    if: ${{ cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@v4
+        if: ${{ cancelled() }}
+        with:
+          persist-credentials: false
+          sparse-checkout: /ci/status.py
+          sparse-checkout-cone-mode: false
+      - name: Mark superseded revision
+        if: ${{ cancelled() }}
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+          REPO: ${{ inputs.repo }}
+          CONTEXT: ${{ inputs.context }}
+          SHA: ${{ needs.prepare.outputs.sha || inputs.ref }}
+          CI_POLLED_REQUEST: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source == 'poll' }}
+        run: /usr/bin/python3 -I ci/status.py --superseded "$REPO" "$SHA" "$CONTEXT"
 
 
   save-verification:
