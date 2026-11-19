@@ -17,6 +17,16 @@ MAX_MARKER_BYTES = 4096
 MAX_ARCHIVE_BYTES = 65536
 
 
+def requested_base(event, source, group, ref, base):
+    # The scheduled poll can discover a genuine PR. A test-unit schedule,
+    # a manual request, or a branch head must execute the entire suite.
+    if (event == 'repository_dispatch' and source == 'poll'
+            and re.fullmatch(r'pr-[1-9][0-9]*', group)
+            and SHA.fullmatch(ref) and SHA.fullmatch(base)):
+        return base
+    return None
+
+
 def changed_paths(src, base, head):
     if not SHA.fullmatch(base or ''):
         return None, None

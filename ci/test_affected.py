@@ -11,6 +11,12 @@ import affected
 
 
 class Affected(unittest.TestCase):
+    def test_regular_pr_discovered_by_the_poll_still_uses_its_pinned_base(self):
+        base, head = 'b' * 40, 'a' * 40
+        self.assertEqual(affected.requested_base('repository_dispatch', 'poll', 'pr-42', head, base), base)
+        self.assertIsNone(affected.requested_base('repository_dispatch', 'poll', 'pr-42', head, ''))
+        self.assertIsNone(affected.requested_base('repository_dispatch', 'poll', 'pr-other', head, base))
+
     def test_pr_diff_uses_merge_base_and_full_run_has_no_base(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)

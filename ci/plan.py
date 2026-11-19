@@ -75,17 +75,23 @@ def main():
     src, ciw = Path(os.environ["SRC"]), Path(os.environ["CIW"])
     repo, context = os.environ["REPO"], os.environ["CONTEXT"]
     sha = subprocess.check_output(["git", "-C", str(src), "rev-parse", "HEAD"], text=True).strip()
-    out = open(os.environ["GITHUB_OUTPUT"], "a")
-    out.write(f"sha={sha}\n")
     if (src / TARGET_ENTRY).is_file():
         kind, entry = "target", (src / TARGET_ENTRY).resolve()
     else:
         kind, entry = "legacy", (ciw / os.environ["DEFAULT_ENTRY"]).resolve()
-    out.write(f"kind={kind}\nentry={entry}\n")
-    out.flush()
+    output = Path(os.environ["GITHUB_OUTPUT"])
+    with output.open("a") as out:
+        out.write(f"sha={sha}\nkind={kind}\nentry={entry}\n")
     selection_dir = Path(os.environ.get("CI_PLAN_DIRECTORY", str(src.resolve() / ".ci-plan")))
     selection_dir.mkdir(parents=True, exist_ok=True)
-    base, paths = affected.changed_paths(src, os.environ.get("CI_AFFECTED_BASE"), sha)
+    requested_base = affected.requested_base(
+        os.environ.get("GITHUB_EVENT_NAME", ""), os.environ.get("CI_REQUEST_SOURCE", ""),
+        os.environ.get("CI_REQUEST_GROUP", ""), os.environ.get("CI_REQUEST_REF", ""),
+        os.environ.get("CI_AFFECTED_BASE", ""),
+    )
+    base, paths = affected.changed_paths(src, requested_base, sha)
+    full_run = repo == "goodputai/test" and paths is None
+
     changes = selection_dir / "changes.json"
     changes.write_text(json.dumps(paths) + "\n")
     try:
@@ -99,21 +105,25 @@ def main():
         if use_affected:
             if plan["affected"].get("changed") != paths:
                 raise ValueError("target plan did not use the prepared change set")
-            verify_always = os.environ.get("CI_VERIFY_ALWAYS") == "true"
+            verify_always = full_run or os.environ.get("CI_VERIFY_ALWAYS") == "true"
             jobs, fingerprint, verified = affected.prune(src, jobs, sha, plan["affected"], verify_always)
             if not any(job["shared"] for job in jobs):
                 shared = None
             evidence = dict(head=sha, base=base, changed=paths, affected=plan["affected"],
                             jobs=[job["id"] for job in jobs], fingerprint=fingerprint, verified=verified)
             (selection_dir / "selection.json").write_text(json.dumps(evidence, sort_keys=True) + "\n")
-            out.write(f"affected=true\naffected_base={base or ''}\n")
+
     except Exception as error:
         print(f"::error::plan failed ({kind} entry {entry}): {error}")
         raise SystemExit(1)
-    out.write(f"jobs={json.dumps(jobs, separators=(',', ':'))}\nreport={'true' if report else 'false'}\n")
     report_jobs = ([shared] if shared else []) + jobs
-    out.write(f"shared={json.dumps(shared, separators=(',', ':')) if shared else ''}\n")
-    out.write(f"report_jobs={json.dumps(report_jobs, separators=(',', ':'))}\n")
+    with output.open("a") as out:
+        out.write(f"full_run={'true' if full_run else 'false'}\n")
+        if use_affected:
+            out.write(f"affected=true\naffected_base={base or ''}\n")
+        out.write(f"jobs={json.dumps(jobs, separators=(',', ':'))}\nreport={'true' if report else 'false'}\n")
+        out.write(f"shared={json.dumps(shared, separators=(',', ':')) if shared else ''}\n")
+        out.write(f"report_jobs={json.dumps(report_jobs, separators=(',', ':'))}\n")
     names = ", ".join(job["id"] for job in report_jobs)
     print(f"{kind} entry {entry}: {len(jobs)} jobs [{names}] report={report}")
     label = "legacy default · " if kind == "legacy" else ""

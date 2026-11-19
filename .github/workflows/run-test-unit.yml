@@ -50,7 +50,9 @@ jobs:
       test_nix_cache: ${{ (github.event.client_payload.nix_cache || (github.event.inputs.nix_cache != 'auto' && github.event.inputs.nix_cache) || vars.TEST_UNIT_NIX_CACHE || 'off') == 'on' }}
       test_poison_host: ${{ github.event.client_payload.poison_host == true || github.event.inputs.poison_host == 'true' }}
       verify_always: ${{ github.event.inputs.verify_always == 'true' }}
-      affected_base: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source == 'poll' && startsWith(github.event.client_payload.group, 'pr-') && github.event.client_payload.base || '' }}
-      ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+      affected_base: ${{ github.event.client_payload.base || '' }}
+      request_source: ${{ github.event.client_payload.source || '' }}
+      request_group: ${{ github.event.client_payload.group || '' }}
+      ref: ${{ github.event.client_payload.ref || github.event.inputs.ref || 'main' }}
     secrets:
       GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}

@@ -45,6 +45,12 @@ on:
       affected_base:
         type: string
         default: ""
+      request_source:
+        type: string
+        default: ""
+      request_group:
+        type: string
+        default: ""
     secrets:
       GIE_GIT_TOKEN:
         required: true
@@ -58,6 +64,7 @@ jobs:
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
       affected: ${{ steps.plan.outputs.affected }}
+      full_run: ${{ steps.plan.outputs.full_run }}
       affected_base: ${{ steps.plan.outputs.affected_base }}
       kind: ${{ steps.plan.outputs.kind }}
       jobs: ${{ steps.plan.outputs.jobs }}
@@ -92,6 +99,9 @@ jobs:
           CIW: ciw
           TEST_UNIT_SETUP: ${{ inputs.test_setup }}
           CI_AFFECTED_BASE: ${{ inputs.affected_base }}
+          CI_REQUEST_SOURCE: ${{ inputs.request_source }}
+          CI_REQUEST_GROUP: ${{ inputs.request_group }}
+          CI_REQUEST_REF: ${{ inputs.ref }}
           CI_PLAN_DIRECTORY: ${{ github.workspace }}/.ci-plan
           CI_ARTIFACT_TOKEN: ${{ github.token }}
           CI_VERIFY_ALWAYS: ${{ inputs.verify_always || inputs.test_poison_host }}
@@ -216,7 +226,7 @@ jobs:
           persist-credentials: false
       - name: Verification marker key
         id: verification
-        if: needs.prepare.outputs.affected != 'true' && matrix.verification && !inputs.verify_always && !inputs.test_poison_host
+        if: needs.prepare.outputs.affected != 'true' && needs.prepare.outputs.full_run != 'true' && matrix.verification && !inputs.verify_always && !inputs.test_poison_host
         env:
           VERIFICATION_FINGERPRINT: ${{ needs.shared.outputs.verification_fingerprint }}
           VERIFICATION_PLAN: ${{ toJSON(matrix.verification) }}
