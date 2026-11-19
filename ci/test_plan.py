@@ -1,7 +1,7 @@
 """Guard the entry plan sanity limit independently of runner capacity."""
 import unittest
 
-from plan import normalize, normalize_shared
+from plan import matrix_order, normalize, normalize_shared
 
 
 class PlanJobLimit(unittest.TestCase):
@@ -14,6 +14,21 @@ class PlanJobLimit(unittest.TestCase):
                 self.assertFalse(report)
         with self.assertRaisesRegex(ValueError, r"^plan must declare 1\.\.32 jobs$"):
             normalize({"version": 1, "jobs": [{"id": f"job-{i}"} for i in range(33)]})
+
+
+class MatrixOrder(unittest.TestCase):
+    def test_cpu_chain_has_first_matrix_positions_and_other_jobs_keep_their_order(self):
+        controls = ['positive', 'replace-on-reuse', 'hardcoded-proxy', 'parent-nix-mount', 'writable-store']
+        cpu_chain = [dict(id=f'nix-cpu-chain-{control}', shared=True) for control in controls]
+        ordinary = [dict(id='static'), dict(id='preflight-node-artifacts'), dict(id='unit-0')]
+        original = [*ordinary[:1], *cpu_chain[:2], ordinary[1], *cpu_chain[2:], ordinary[2]]
+        jobs = normalize({"version": 1, "jobs": original, "shared": {"id": "shared"}})[0]
+
+        observed = matrix_order('goodputai/test', jobs)
+        self.assertEqual([job['id'] for job in observed],
+                         [job['id'] for job in cpu_chain + ordinary])
+        self.assertEqual([job['id'] for job in jobs], [job['id'] for job in original])
+        self.assertEqual(matrix_order('goodputai/dynamo', jobs), jobs)
 
 
 class SharedPreparation(unittest.TestCase):

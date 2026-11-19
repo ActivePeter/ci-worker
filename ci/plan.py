@@ -55,6 +55,12 @@ def normalize(plan):
     return jobs, bool(plan.get("report", False))
 
 
+def matrix_order(repo, jobs):
+    if repo != "goodputai/test":
+        return jobs
+    return sorted(jobs, key=lambda job: not job["id"].startswith("nix-cpu-chain-"))
+
+
 def normalize_shared(plan):
     record = plan.get("shared")
     if record is None:
@@ -87,7 +93,8 @@ def main():
     except Exception as error:
         print(f"::error::plan failed ({kind} entry {entry}): {error}")
         raise SystemExit(1)
-    out.write(f"jobs={json.dumps(jobs, separators=(',', ':'))}\nreport={'true' if report else 'false'}\n")
+    ordered_jobs = matrix_order(repo, jobs)
+    out.write(f"jobs={json.dumps(ordered_jobs, separators=(',', ':'))}\nreport={'true' if report else 'false'}\n")
     report_jobs = ([shared] if shared else []) + jobs
     out.write(f"shared={json.dumps(shared, separators=(',', ':')) if shared else ''}\n")
     out.write(f"report_jobs={json.dumps(report_jobs, separators=(',', ':'))}\n")

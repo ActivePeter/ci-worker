@@ -326,7 +326,8 @@ jobs:
 
   report:
     needs: [prepare, shared, run]
-    if: always()
+    # Report failures, but release the concurrency group when a run is superseded.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -403,7 +404,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
       - name: Final status (only writer)
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
           REPO: ${{ inputs.repo }}
