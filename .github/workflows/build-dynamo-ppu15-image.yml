@@ -30,6 +30,11 @@ jobs:
       REVISION: ${{ inputs.revision }}
       ACR_REGISTRY_URL: goodputai-registry.cn-hangzhou.cr.aliyuncs.com
       GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      # Everything large lives on the LVM volume; / keeps only the runner itself.
+      WORK: /build/work
+      CARGO_TARGET_DIR: /build/work/cargo-target
+      CARGO_HOME: /build/work/cargo-home
+      RUSTUP_HOME: /build/work/rustup-home
     steps:
       - name: Clean hosted runner disk
         run: |
@@ -43,8 +48,8 @@ jobs:
       - name: Combine root and temporary disk space for Docker
         uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
         with:
-          build-mount-path: /var/lib/docker
-          build-mount-path-ownership: root:root
+          build-mount-path: /build
+          build-mount-path-ownership: runner:runner
           root-reserve-mb: '10240'
           temp-reserve-mb: '2048'
           swap-size-mb: '2048'
@@ -52,23 +57,28 @@ jobs:
       - name: Start Docker on the LVM volume
         run: |
           set -euo pipefail
-          mountpoint /var/lib/docker
+          mountpoint /build
+          sudo install -d -o root -g root /build/docker
+          mkdir -p "$WORK" "$CARGO_TARGET_DIR" "$CARGO_HOME" "$RUSTUP_HOME"
+          # The runner dies without logs when / fills; keep a disk trail on the LVM volume.
+          nohup bash -c 'while true; do { date -u +%FT%TZ; df -h / /build; avail=$(df --output=avail -k / | tail -1); if [ "$avail" -lt 3145728 ]; then sudo du -xh --max-depth=3 /home/runner /tmp 2>/dev/null | sort -h | tail -15; fi; } >> "$WORK/disk-watch.log" 2>&1; sleep 60; done' >/dev/null 2>&1 &
+          disown
           sudo install -d /etc/docker
           if sudo test -f /etc/docker/daemon.json; then
             sudo cat /etc/docker/daemon.json
           else
             printf '{}\n'
-          fi | jq '.features = ((.features // {}) + {"containerd-snapshotter": false})' > "$RUNNER_TEMP/docker-daemon.json"
-          sudo install -m 0644 "$RUNNER_TEMP/docker-daemon.json" /etc/docker/daemon.json
+          fi | jq '.features = ((.features // {}) + {"containerd-snapshotter": false}) | .["data-root"] = "/build/docker"' > "$WORK/docker-daemon.json"
+          sudo install -m 0644 "$WORK/docker-daemon.json" /etc/docker/daemon.json
           sudo systemctl start docker.service
           docker_root=$(docker info --format '{{.DockerRootDir}}')
           driver=$(docker info -f '{{.Driver}}')
           printf 'DockerRootDir=%s\n' "$docker_root"
           printf 'Driver=%s\n' "$driver"
           docker info -f 'DriverStatus={{json .DriverStatus}}'
-          test "$docker_root" = /var/lib/docker
+          test "$docker_root" = /build/docker
           test "$driver" = overlay2
-          df -h / /mnt /var/lib/docker
+          df -h / /mnt /build
 
       - name: Validate source and revision inputs
         run: |
@@ -138,18 +148,18 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y libclang-dev python3-venv
-          /usr/bin/python3 -m venv "$RUNNER_TEMP/image-python"
-          export PATH="$RUNNER_TEMP/image-python/bin:$PATH"
-          printf '%s\n' "$RUNNER_TEMP/image-python/bin" >> "$GITHUB_PATH"
+          /usr/bin/python3 -m venv "$WORK/image-python"
+          export PATH="$WORK/image-python/bin:$PATH"
+          printf '%s\n' "$WORK/image-python/bin" >> "$GITHUB_PATH"
           rustup toolchain install 1.96.1 --profile minimal
           python3 -m pip install --quiet 'maturin>=1.8,<2'
           RUSTUP_TOOLCHAIN=1.96.1 python3 -m maturin build --release --locked \
-            --manifest-path lib/kvbm-host/Cargo.toml --out "$RUNNER_TEMP/hicache-dist"
-          test "$(find "$RUNNER_TEMP/hicache-dist" -maxdepth 1 -name 'dynamo_hicache-*.whl' | wc -l)" -eq 1
+            --manifest-path lib/kvbm-host/Cargo.toml --out "$WORK/hicache-dist"
+          test "$(find "$WORK/hicache-dist" -maxdepth 1 -name 'dynamo_hicache-*.whl' | wc -l)" -eq 1
 
       - name: Report Docker space before runtime build
         run: |
-          df -h /var/lib/docker
+          df -h / /build/docker
           docker system df
 
       - name: Build and verify the immutable local PPU15 runtime
@@ -161,13 +171,13 @@ jobs:
           python3 -m pip install --quiet 'Jinja2==3.1.6' 'PyYAML==6.0.2' 'dockerfile-parse==2.0.1' 'setuptools==80.9.0' 'wheel==0.45.1'
           python3 release-infra/container/ppu/build_ppu15_runtime.py \
             --source dynamo-src --dynamo-commit "$DYNAMO_SOURCE_COMMIT" \
-            --work "$RUNNER_TEMP/ppu15-runtime" --revision "$REVISION" \
-            --extra-wheels "$RUNNER_TEMP/hicache-dist" --ext-source gie-ext-src
+            --work "$WORK/ppu15-runtime" --revision "$REVISION" \
+            --extra-wheels "$WORK/hicache-dist" --ext-source gie-ext-src
 
       - name: Report Docker space after runtime build
         if: always() && steps.runtime-build.outcome != 'skipped'
         run: |
-          df -h /var/lib/docker
+          df -h / /build/docker
           docker system df
 
       - name: Read local runtime image identity
@@ -176,7 +186,7 @@ jobs:
           EXT_COMMIT: ${{ steps.ext-pin.outputs.commit }}
         run: |
           set -euo pipefail
-          runtime_dir="$RUNNER_TEMP/ppu15-runtime"
+          runtime_dir="$WORK/ppu15-runtime"
           receipt="$runtime_dir/local-build.json"
           jq -e --arg sha "$DYNAMO_SOURCE_COMMIT" \
             '.dynamo_commit == $sha and .packaging_gate == "pass" and .published == false' "$receipt"
@@ -194,14 +204,14 @@ jobs:
         with:
           name: release-1.6.1-ppu15-sglang-runtime
           path: |
-            ${{ runner.temp }}/ppu15-runtime/plan.json
-            ${{ runner.temp }}/ppu15-runtime/engine-contract.json
-            ${{ runner.temp }}/ppu15-runtime/wheel-sha256.json
-            ${{ runner.temp }}/ppu15-runtime/context/ext-wheel.json
-            ${{ runner.temp }}/ppu15-runtime/runtime-contract.json
-            ${{ runner.temp }}/ppu15-runtime/assembly-fragment.json
-            ${{ runner.temp }}/ppu15-runtime/local-build.json
-            ${{ runner.temp }}/ppu15-runtime/runtime-image-metadata.json
+            /build/work/ppu15-runtime/plan.json
+            /build/work/ppu15-runtime/engine-contract.json
+            /build/work/ppu15-runtime/wheel-sha256.json
+            /build/work/ppu15-runtime/context/ext-wheel.json
+            /build/work/ppu15-runtime/runtime-contract.json
+            /build/work/ppu15-runtime/assembly-fragment.json
+            /build/work/ppu15-runtime/local-build.json
+            /build/work/ppu15-runtime/runtime-image-metadata.json
           if-no-files-found: warn
 
       - name: Derive and verify the SGLang frontend from the checked runtime
@@ -213,7 +223,7 @@ jobs:
           python3 release-infra/container/ppu/derive_ppu15_frontend.py \
             --source dynamo-src --commit "$DYNAMO_SOURCE_COMMIT" \
             --base "$BASE_IMAGE" --base-id "$BASE_ID" --revision "$REVISION" \
-            --work "$RUNNER_TEMP/frontend-evidence"
+            --work "$WORK/frontend-evidence"
 
       - name: Publish the verified frontend
         if: inputs.push_frontend
@@ -222,7 +232,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import json, os, pathlib, re, subprocess
-          root=pathlib.Path(os.environ['RUNNER_TEMP'],'frontend-evidence')
+          root=pathlib.Path(os.environ['WORK'],'frontend-evidence')
           value=json.loads((root/'frontend-local-image.json').read_text())
           actual=subprocess.check_output(['docker','image','inspect','--format={{.Id}}',value['image']],text=True).strip()
           assert actual==value['image_id'] and value['verify']['contract_gate']=='pass'
@@ -243,7 +253,7 @@ jobs:
       - name: Report Docker space after frontend build and publication
         if: always() && steps.frontend-build.outcome != 'skipped'
         run: |
-          df -h /var/lib/docker
+          df -h / /build/docker
           docker system df
 
       - name: Archive the frontend publication receipt
@@ -251,5 +261,5 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ppu15-sglang-frontend-verification
-          path: ${{ runner.temp }}/frontend-evidence/frontend-published.json
+          path: /build/work/frontend-evidence/frontend-published.json
           if-no-files-found: warn
