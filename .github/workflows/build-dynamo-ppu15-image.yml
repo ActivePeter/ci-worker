@@ -53,10 +53,21 @@ jobs:
         run: |
           set -euo pipefail
           mountpoint /var/lib/docker
+          sudo install -d /etc/docker
+          if sudo test -f /etc/docker/daemon.json; then
+            sudo cat /etc/docker/daemon.json
+          else
+            printf '{}\n'
+          fi | jq '.features = ((.features // {}) + {"containerd-snapshotter": false})' > "$RUNNER_TEMP/docker-daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/docker-daemon.json" /etc/docker/daemon.json
           sudo systemctl start docker.service
           docker_root=$(docker info --format '{{.DockerRootDir}}')
+          driver=$(docker info -f '{{.Driver}}')
           printf 'DockerRootDir=%s\n' "$docker_root"
+          printf 'Driver=%s\n' "$driver"
+          docker info -f 'DriverStatus={{json .DriverStatus}}'
           test "$docker_root" = /var/lib/docker
+          test "$driver" = overlay2
           df -h / /mnt /var/lib/docker
 
       - name: Validate source and revision inputs
