@@ -1,0 +1,255 @@
+name: Build Dynamo 1.6.1 PPU15 runtime and frontend
+
+on:
+  workflow_dispatch:
+    inputs:
+      dynamo_ref:
+        description: Full Dynamo commit on release/1.6.1
+        required: true
+        type: string
+      revision:
+        description: Immutable image build revision
+        required: true
+        default: '2026112102'
+        type: string
+      push_frontend:
+        description: Push the verified frontend to ACR
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      DYNAMO_SOURCE_COMMIT: ${{ inputs.dynamo_ref }}
+      REVISION: ${{ inputs.revision }}
+      ACR_REGISTRY_URL: goodputai-registry.cn-hangzhou.cr.aliyuncs.com
+      GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Clean hosted runner disk
+        run: |
+          set -euo pipefail
+          df -h / /mnt
+          trap 'df -h / /mnt' EXIT
+          sudo rm -rf -- /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          docker system prune --all --force --volumes
+          sudo systemctl stop docker.service docker.socket
+
+      - name: Combine root and temporary disk space for Docker
+        uses: easimon/maximize-build-space@fc881a613ad2a34aca9c9624518214ebc21dfc0c # v10
+        with:
+          build-mount-path: /var/lib/docker
+          build-mount-path-ownership: root:root
+          root-reserve-mb: '10240'
+          temp-reserve-mb: '2048'
+          swap-size-mb: '2048'
+
+      - name: Start Docker on the LVM volume
+        run: |
+          set -euo pipefail
+          mountpoint /var/lib/docker
+          sudo install -d /etc/docker
+          if sudo test -f /etc/docker/daemon.json; then
+            sudo cat /etc/docker/daemon.json
+          else
+            printf '{}\n'
+          fi | jq '.features = ((.features // {}) + {"containerd-snapshotter": false})' > "$RUNNER_TEMP/docker-daemon.json"
+          sudo install -m 0644 "$RUNNER_TEMP/docker-daemon.json" /etc/docker/daemon.json
+          sudo systemctl start docker.service
+          docker_root=$(docker info --format '{{.DockerRootDir}}')
+          driver=$(docker info -f '{{.Driver}}')
+          printf 'DockerRootDir=%s\n' "$docker_root"
+          printf 'Driver=%s\n' "$driver"
+          docker info -f 'DriverStatus={{json .DriverStatus}}'
+          test "$docker_root" = /var/lib/docker
+          test "$driver" = overlay2
+          df -h / /mnt /var/lib/docker
+
+      - name: Validate source and revision inputs
+        run: |
+          [[ "$DYNAMO_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$REVISION" =~ ^[1-9][0-9]*$ ]]
+
+      - name: Checkout packaging scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: goodputai/dynamo
+          ref: ${{ inputs.dynamo_ref }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          persist-credentials: false
+          path: release-infra
+
+      - name: Checkout immutable Dynamo source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: goodputai/dynamo
+          ref: ${{ inputs.dynamo_ref }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          persist-credentials: false
+          path: dynamo-src
+          fetch-depth: 0
+
+      - name: Read and verify the immutable input admission extension pin
+        id: ext-pin
+        run: |
+          set -euo pipefail
+          test "$(git -C release-infra rev-parse HEAD)" = "$DYNAMO_SOURCE_COMMIT"
+          test "$(git -C dynamo-src rev-parse HEAD)" = "$DYNAMO_SOURCE_COMMIT"
+          git -C dynamo-src merge-base --is-ancestor "$DYNAMO_SOURCE_COMMIT" origin/release/1.6.1
+          ext_commit=$(jq -er '.ext_commit | select(test("^[0-9a-f]{40}$"))' release-infra/container/ppu/ppu15-inputs.json)
+          printf 'commit=%s\n' "$ext_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the pinned private extension without persisting credentials
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: goodputai/goodput-infer-ext
+          ref: ${{ steps.ext-pin.outputs.commit }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          persist-credentials: false
+          path: gie-ext-src
+
+      - name: Login to ACR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ${{ env.ACR_REGISTRY_URL }}
+          username: ${{ secrets.ACR_REGISTRY_USERNAME }}
+          password: ${{ secrets.ACR_REGISTRY_PASSWORD }}
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+            max-parallelism = 1
+
+      - name: Configure private ext access
+        uses: ./gie-ext-src/.github/actions/gie-git-auth
+        with:
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          lockfile: dynamo-src/Cargo.lock
+
+      - name: Build the dynamo_hicache wheel from the exact source commit
+        working-directory: dynamo-src
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev python3-venv
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/image-python"
+          export PATH="$RUNNER_TEMP/image-python/bin:$PATH"
+          printf '%s\n' "$RUNNER_TEMP/image-python/bin" >> "$GITHUB_PATH"
+          rustup toolchain install 1.96.1 --profile minimal
+          python3 -m pip install --quiet 'maturin>=1.8,<2'
+          RUSTUP_TOOLCHAIN=1.96.1 python3 -m maturin build --release --locked \
+            --manifest-path lib/kvbm-host/Cargo.toml --out "$RUNNER_TEMP/hicache-dist"
+          test "$(find "$RUNNER_TEMP/hicache-dist" -maxdepth 1 -name 'dynamo_hicache-*.whl' | wc -l)" -eq 1
+
+      - name: Report Docker space before runtime build
+        run: |
+          df -h /var/lib/docker
+          docker system df
+
+      - name: Build and verify the immutable local PPU15 runtime
+        id: runtime-build
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet 'Jinja2==3.1.6' 'PyYAML==6.0.2' 'dockerfile-parse==2.0.1' 'setuptools==80.9.0' 'wheel==0.45.1'
+          python3 release-infra/container/ppu/build_ppu15_runtime.py \
+            --source dynamo-src --dynamo-commit "$DYNAMO_SOURCE_COMMIT" \
+            --work "$RUNNER_TEMP/ppu15-runtime" --revision "$REVISION" \
+            --extra-wheels "$RUNNER_TEMP/hicache-dist" --ext-source gie-ext-src
+
+      - name: Report Docker space after runtime build
+        if: always() && steps.runtime-build.outcome != 'skipped'
+        run: |
+          df -h /var/lib/docker
+          docker system df
+
+      - name: Read local runtime image identity
+        id: runtime
+        env:
+          EXT_COMMIT: ${{ steps.ext-pin.outputs.commit }}
+        run: |
+          set -euo pipefail
+          runtime_dir="$RUNNER_TEMP/ppu15-runtime"
+          receipt="$runtime_dir/local-build.json"
+          jq -e --arg sha "$DYNAMO_SOURCE_COMMIT" \
+            '.dynamo_commit == $sha and .packaging_gate == "pass" and .published == false' "$receipt"
+          jq -e --arg sha "$DYNAMO_SOURCE_COMMIT" --arg ext "$EXT_COMMIT" \
+            '.dynamo_commit == $sha and .contract_gate == "pass" and .ext_wheel.commit == $ext and .input_admission' \
+            "$runtime_dir/runtime-contract.json"
+          image=$(jq -er '.image' "$receipt")
+          image_id=$(jq -er '.image_id | select(test("^sha256:[0-9a-f]{64}$"))' "$receipt")
+          test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image_id"
+          printf 'image=%s\nimage_id=%s\n' "$image" "$image_id" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Upload PPU15 build evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-1.6.1-ppu15-sglang-runtime
+          path: |
+            ${{ runner.temp }}/ppu15-runtime/plan.json
+            ${{ runner.temp }}/ppu15-runtime/engine-contract.json
+            ${{ runner.temp }}/ppu15-runtime/wheel-sha256.json
+            ${{ runner.temp }}/ppu15-runtime/context/ext-wheel.json
+            ${{ runner.temp }}/ppu15-runtime/runtime-contract.json
+            ${{ runner.temp }}/ppu15-runtime/assembly-fragment.json
+            ${{ runner.temp }}/ppu15-runtime/local-build.json
+            ${{ runner.temp }}/ppu15-runtime/runtime-image-metadata.json
+          if-no-files-found: warn
+
+      - name: Derive and verify the SGLang frontend from the checked runtime
+        id: frontend-build
+        env:
+          BASE_IMAGE: ${{ steps.runtime.outputs.image }}
+          BASE_ID: ${{ steps.runtime.outputs.image_id }}
+        run: |
+          python3 release-infra/container/ppu/derive_ppu15_frontend.py \
+            --source dynamo-src --commit "$DYNAMO_SOURCE_COMMIT" \
+            --base "$BASE_IMAGE" --base-id "$BASE_ID" --revision "$REVISION" \
+            --work "$RUNNER_TEMP/frontend-evidence"
+
+      - name: Publish the verified frontend
+        if: inputs.push_frontend
+        env:
+          REGISTRY: ${{ env.ACR_REGISTRY_URL }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          root=pathlib.Path(os.environ['RUNNER_TEMP'],'frontend-evidence')
+          value=json.loads((root/'frontend-local-image.json').read_text())
+          actual=subprocess.check_output(['docker','image','inspect','--format={{.Id}}',value['image']],text=True).strip()
+          assert actual==value['image_id'] and value['verify']['contract_gate']=='pass'
+          target=os.environ['REGISTRY']+'/goodputai/dynamo-frontend:'+value['image'].split(':',1)[1]
+          probe=subprocess.run(['docker','buildx','imagetools','inspect',target],capture_output=True,text=True)
+          assert probe.returncode!=0, 'Immutable target exists'
+          assert re.search(r'manifest unknown|not found',probe.stderr,re.I), 'Cannot establish destination absence'
+          subprocess.run(['docker','tag',value['image'],target],check=True)
+          subprocess.run(['timeout','--signal=INT','--kill-after=60s','2700s','docker','push',target],check=True)
+          raw=subprocess.check_output(['docker','buildx','imagetools','inspect',target],text=True)
+          digest=re.search(r'^Digest:\s+(sha256:[0-9a-f]{64})$',raw,re.M).group(1)
+          manifest=json.loads(subprocess.check_output(['docker','buildx','imagetools','inspect','--raw',target],text=True))
+          assert manifest.get('config',{}).get('digest')==actual, 'Registry config differs from verified frontend'
+          value.update(published=True,registry_image=target,registry_digest=digest)
+          (root/'frontend-published.json').write_text(json.dumps(value,indent=2)+'\n')
+          PY
+
+      - name: Report Docker space after frontend build and publication
+        if: always() && steps.frontend-build.outcome != 'skipped'
+        run: |
+          df -h /var/lib/docker
+          docker system df
+
+      - name: Archive the frontend publication receipt
+        if: always() && inputs.push_frontend
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ppu15-sglang-frontend-verification
+          path: ${{ runner.temp }}/frontend-evidence/frontend-published.json
+          if-no-files-found: warn
