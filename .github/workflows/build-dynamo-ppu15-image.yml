@@ -17,6 +17,11 @@ on:
         required: true
         default: false
         type: boolean
+      push_runtime:
+        description: Push the verified runtime to ACR
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -198,6 +203,30 @@ jobs:
           test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image_id"
           printf 'image=%s\nimage_id=%s\n' "$image" "$image_id" | tee -a "$GITHUB_OUTPUT"
 
+      - name: Publish the verified runtime
+        if: inputs.push_runtime
+        env:
+          IMAGE: ${{ steps.runtime.outputs.image }}
+          IMAGE_ID: ${{ steps.runtime.outputs.image_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          image=os.environ['IMAGE']; image_id=os.environ['IMAGE_ID']
+          actual=subprocess.check_output(['docker','image','inspect','--format={{.Id}}',image],text=True).strip()
+          assert actual==image_id, 'Local runtime differs from verified receipt'
+          probe=subprocess.run(['docker','buildx','imagetools','inspect',image],capture_output=True,text=True)
+          assert probe.returncode!=0, 'Immutable target exists'
+          assert re.search(r'manifest unknown|not found',probe.stderr,re.I), 'Cannot establish destination absence'
+          subprocess.run(['timeout','--signal=INT','--kill-after=60s','3600s','docker','push',image],check=True)
+          raw=subprocess.check_output(['docker','buildx','imagetools','inspect',image],text=True)
+          digest=re.search(r'^Digest:\s+(sha256:[0-9a-f]{64})$',raw,re.M).group(1)
+          manifest=json.loads(subprocess.check_output(['docker','buildx','imagetools','inspect','--raw',image],text=True))
+          assert manifest.get('config',{}).get('digest')==actual, 'Registry config differs from verified runtime'
+          receipt=dict(image=image,image_id=actual,published=True,registry_digest=digest,run=os.environ['GITHUB_RUN_URL'])
+          pathlib.Path(os.environ['WORK'],'ppu15-runtime','runtime-published.json').write_text(json.dumps(receipt,indent=2)+'\n')
+          print(json.dumps(receipt,indent=2))
+          PY
+
       - name: Upload PPU15 build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -212,6 +241,7 @@ jobs:
             /build/work/ppu15-runtime/assembly-fragment.json
             /build/work/ppu15-runtime/local-build.json
             /build/work/ppu15-runtime/runtime-image-metadata.json
+            /build/work/ppu15-runtime/runtime-published.json
           if-no-files-found: warn
 
       - name: Derive and verify the SGLang frontend from the checked runtime
