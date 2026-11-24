@@ -1,4 +1,4 @@
-"""Check the sglang legacy default entry plan and job/guard contracts."""
+"""Check the SGLang legacy entry plan, profiles, and dependency resolution."""
 import json
 import os
 import re
@@ -35,21 +35,6 @@ class SglangEntryTests(unittest.TestCase):
                 )
                 self.assertEqual(res.returncode, 2)
 
-    def test_missing_managed_confirm_fails_when_mixin_exists(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            mixin = root / "python/sglang/srt/mem_cache/unified_cache/managed_host_mixin.py"
-            mixin.parent.mkdir(parents=True)
-            mixin.write_text("# stub\n")
-            res = subprocess.run(
-                ["bash", str(ENTRY.resolve()), "run", "cpu-unit"],
-                cwd=root,
-                capture_output=True,
-                text=True,
-            )
-            self.assertNotEqual(res.returncode, 0)
-            self.assertIn("test_managed_confirm.py is missing", res.stderr)
-
     def run_entry(self, root, verb, **extra_env):
         env = os.environ.copy()
         env.pop("SGLANG_CI_PROFILE", None)
@@ -67,10 +52,10 @@ class SglangEntryTests(unittest.TestCase):
             re.findall(r"^  (test_\w+\.py)$", ENTRY.read_text(), re.MULTILINE)
         ) - {PREFETCH_MARKER, SHA256_MARKER}
         cases = (
-            ("ppu15-0.5.21", PREFETCH_MARKER, SHA256_MARKER, "", "23"),
-            ("ppu-0.5.17-beta", SHA256_MARKER, PREFETCH_MARKER, "unset", "61"),
+            ("ppu15-0.5.21", PREFETCH_MARKER, SHA256_MARKER, "114", 4),
+            ("ppu-0.5.17-beta", SHA256_MARKER, PREFETCH_MARKER, "64", 2),
         )
-        for profile, marker, other_marker, cuda, count in cases:
+        for profile, marker, other_marker, count, deselected in cases:
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tests = root / MEM_CACHE_TEST_DIR
@@ -92,7 +77,12 @@ class SglangEntryTests(unittest.TestCase):
                 )
                 self.assertIn(f"pytest arg: {MEM_CACHE_TEST_DIR / marker}\n", result.stdout)
                 self.assertNotIn(other_marker, result.stdout)
-                self.assertIn(f"CUDA_VISIBLE_DEVICES={cuda}\n", result.stdout)
+                self.assertIn("CUDA_VISIBLE_DEVICES=unset\n", result.stdout)
+                self.assertEqual(result.stdout.count("pytest arg: --deselect\n"), deselected)
+                if profile == "ppu-0.5.17-beta":
+                    self.assertIn(
+                        f"pytest arg: {MEM_CACHE_TEST_DIR / 'test_umbp_store.py'}\n", result.stdout,
+                    )
 
     def test_profile_requires_a_unique_marker_without_override(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -106,35 +96,31 @@ class SglangEntryTests(unittest.TestCase):
                     result = self.run_entry(root, "run")
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("Cannot identify SGLang CI profile", result.stderr)
+                    self.assertIn("For local runs only", result.stderr)
 
             result = self.run_entry(root, "run", SGLANG_CI_PROFILE="ppu15-0.5.21")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("ppu15-0.5.21 is missing required test file", result.stderr)
-            self.assertIn("test_managed_confirm.py", result.stderr)
+            self.assertIn("test_0519_storage_codec_compat.py", result.stderr)
 
             result = self.run_entry(root, "run", SGLANG_CI_PROFILE="unknown")
             self.assertEqual(result.returncode, 2)
             self.assertIn("Invalid SGLANG_CI_PROFILE", result.stderr)
 
     def test_setup_reads_dependency_specs_before_installing(self):
+        linux_torch = "torch==2.13.0 ; sys_platform == 'linux'"
+        other_torch = "torch==2.11.0 ; sys_platform != 'linux'"
         cases = (
             (
-                ["transformers==5.12.1", "tokenizers==0.22.2", "xgrammar==0.2.7"],
-                ["transformers==5.12.1", "tokenizers==0.22.2", "xgrammar==0.2.7", "datasets"],
+                [linux_torch, other_torch, "transformers==5.12.1", "tokenizers==0.22.2", "xgrammar==0.2.7"],
+                [linux_torch, other_torch, "transformers==5.12.1", "tokenizers==0.22.2", "xgrammar==0.2.7"],
                 "",
             ),
-            (
-                ["transformers >= 5.0", "xgrammar==0.2.1"],
-                ["transformers >= 5.0", "tokenizers", "xgrammar==0.2.1", "datasets"],
-                "",
-            ),
-            (
-                ["transformers==5.12.1"],
-                ["transformers==5.12.1", "tokenizers", "xgrammar", "datasets"],
-                "pyproject 里没有 xgrammar 依赖声明",
-            ),
-            (["transformers-extra"], [], "pyproject 里没有 transformers 依赖声明"),
+            ("torch", [], "pyproject 里没有 torch 依赖声明"),
+            ("transformers", [], "pyproject 里没有 transformers 依赖声明"),
+            ("xgrammar", [], "pyproject 里没有 xgrammar 依赖声明"),
         )
+        baseline = {"torch": "torch==2.11.0", "transformers": "transformers==5.12.1", "xgrammar": "xgrammar==0.2.1"}
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pyproject = root / "python/pyproject.toml"
@@ -146,6 +132,8 @@ class SglangEntryTests(unittest.TestCase):
 
             for dependencies, expected, diagnostic in cases:
                 with self.subTest(dependencies=dependencies):
+                    if isinstance(dependencies, str):
+                        dependencies = [spec for name, spec in baseline.items() if name != dependencies]
                     pyproject.write_text(
                         f"[project]\ndependencies = {json.dumps(dependencies)}\n",
                         encoding="utf-8",
@@ -156,8 +144,15 @@ class SglangEntryTests(unittest.TestCase):
                         self.assertEqual(result.stdout, "")
                     else:
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        for dependency in expected:
-                            self.assertIn(f"uv arg: {dependency}\n", result.stdout)
+                        cpu_install, runtime_install = result.stdout.split("uv arg: pip\n")[1:]
+                        self.assertIn("https://download.pytorch.org/whl/cpu", cpu_install)
+                        for dependency in expected[:2]:
+                            self.assertIn(f"uv arg: {dependency}\n", cpu_install)
+                            self.assertNotIn(dependency, runtime_install)
+                        for dependency in (*expected[2:], "datasets", "parameterized"):
+                            self.assertIn(f"uv arg: {dependency}\n", runtime_install)
+                        self.assertIn("sglang-constraints.txt", cpu_install)
+                        self.assertIn("sglang-constraints.txt", runtime_install)
                     if diagnostic:
                         self.assertIn(diagnostic, result.stderr)
                     else:
