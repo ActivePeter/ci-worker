@@ -38,6 +38,7 @@ class SglangEntryTests(unittest.TestCase):
     def run_entry(self, root, verb, **extra_env):
         env = os.environ.copy()
         env.pop("SGLANG_CI_PROFILE", None)
+        env.pop("SGLANG_CI_BASE_REF", None)
         env.update(extra_env)
         return subprocess.run(
             ["bash", str(ENTRY), verb, "cpu-unit"],
@@ -101,12 +102,47 @@ class SglangEntryTests(unittest.TestCase):
 
             result = self.run_entry(root, "run", SGLANG_CI_PROFILE="ppu15-0.5.21")
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("ppu15-0.5.21 is missing required test file", result.stderr)
+            self.assertIn("PR 落后 base 分支 ppu15-0.5.21，请 rebase", result.stderr)
             self.assertIn("test_0519_storage_codec_compat.py", result.stderr)
 
             result = self.run_entry(root, "run", SGLANG_CI_PROFILE="unknown")
             self.assertEqual(result.returncode, 2)
             self.assertIn("Invalid SGLANG_CI_PROFILE", result.stderr)
+
+    def test_base_ref_selects_profile_without_consulting_markers(self):
+        cases = (
+            ("ppu15-0.5.21", SHA256_MARKER, PREFETCH_MARKER),
+            ("ppu-0.5.17-beta", PREFETCH_MARKER, SHA256_MARKER),
+        )
+        for base, unrelated_marker, required_marker in cases:
+            with self.subTest(base=base), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tests = root / MEM_CACHE_TEST_DIR
+                tests.mkdir(parents=True)
+                (tests / unrelated_marker).touch()
+
+                result = self.run_entry(root, "run", SGLANG_CI_BASE_REF=base)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f"PR 落后 base 分支 {base}，请 rebase", result.stderr)
+                self.assertIn(f"  {MEM_CACHE_TEST_DIR / required_marker}\n", result.stderr)
+
+                rejected = self.run_entry(root, "run", SGLANG_CI_BASE_REF="main")
+                self.assertEqual(rejected.returncode, 2, rejected.stderr)
+                self.assertIn("Unsupported SGLang CI base_ref 'main'", rejected.stderr)
+
+    def test_missing_files_are_all_listed_with_the_rebase_hint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tests = root / MEM_CACHE_TEST_DIR
+            tests.mkdir(parents=True)
+            (tests / "test_decode_radix_lock_ref.py").touch()
+            result = self.run_entry(root, "run", SGLANG_CI_BASE_REF="ppu-0.5.17-beta")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            heading, *missing = result.stderr.splitlines()
+            self.assertEqual(heading, "PR 落后 base 分支 ppu-0.5.17-beta，请 rebase")
+            self.assertIn(f"  {MEM_CACHE_TEST_DIR / SHA256_MARKER}", missing)
+            self.assertIn(f"  {MEM_CACHE_TEST_DIR / 'test_unified_radix_hicache_dispatch.py'}", missing)
+            self.assertNotIn(f"  {MEM_CACHE_TEST_DIR / 'test_decode_radix_lock_ref.py'}", missing)
 
     def test_setup_reads_dependency_specs_before_installing(self):
         linux_torch = "torch==2.13.0 ; sys_platform == 'linux'"

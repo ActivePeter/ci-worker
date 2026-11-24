@@ -117,6 +117,10 @@ if method == "GET":
             if method == "POST" and endpoint.endswith("/dispatches")
         ]
         self.assertEqual({payload["ref"]: payload["group"] for payload in dispatches}, expected)
+        self.assertEqual(
+            {payload["ref"]: payload["base_ref"] for payload in dispatches},
+            {"ba": "release/a", "bb": "release/b", "p001": "release/a", "p003": "release/b"},
+        )
         self.assertIn("dispatched=4", result.stdout)
 
     def test_without_whitelist_keeps_legacy_pr_and_protected_branch_selection(self):
@@ -134,6 +138,27 @@ if method == "GET":
             ["selected legacy branch-protected_legacy", "selected p001 pr-1", "selected p002 pr-2", "selected=3"],
         )
         self.assertEqual(len(requests), 2)
+
+    def test_dispatch_without_whitelist_keeps_legacy_payload(self):
+        result, requests = self.run_poll({
+            f"repos/{REPO}/pulls?state=open&per_page=100": [pull(1, "release/a")],
+            f"repos/{REPO}/branches?protected=true&per_page=100": [
+                {"name": "protected/legacy", "commit": {"sha": "legacy"}},
+            ],
+            f"repos/{REPO}/commits/p001/status": {"statuses": []},
+            f"repos/{REPO}/commits/legacy/status": {"statuses": []},
+        })
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            [body for method, endpoint, body in requests
+             if method == "POST" and endpoint.endswith("/dispatches")],
+            [
+                {"event_type": "run-test",
+                 "client_payload": {"ref": "legacy", "group": "branch-protected_legacy", "source": "poll"}},
+                {"event_type": "run-test",
+                 "client_payload": {"ref": "p001", "group": "pr-1", "source": "poll"}},
+            ],
+        )
 
     def test_whitelist_checks_past_the_first_page_of_open_prs(self):
         result, _ = self.run_poll({

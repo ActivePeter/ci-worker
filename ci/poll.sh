@@ -87,11 +87,15 @@ while read -r ref group target_branch; do
     '[.statuses[]? | select(.context==$ctx)] | sort_by(.updated_at) | .[-1].state // empty')
   if [ -n "$state" ]; then echo "skip $ref $group (latest=$state)"; continue; fi
   echo "queue $ref $group"
+  dispatch_payload="{\"event_type\":\"$EVENT\",\"client_payload\":{\"ref\":\"$ref\",\"group\":\"$group\",\"source\":\"poll\"}}"
+  if [ -n "$target_branch" ]; then
+    dispatch_payload=$(jq -c --arg base_ref "$target_branch" '.client_payload.base_ref = $base_ref' <<< "$dispatch_payload")
+  fi
   curl -fsS -X POST -H "$H1" -H "$H2" "$API/repos/$REPO/statuses/$ref" \
     -d "{\"state\":\"pending\",\"context\":\"$CTX\",\"description\":\"queued by poll\"}" >/dev/null \
     || { echo "warn: pending-mark failed for $ref"; continue; }
   curl -fsS -X POST -H "$H1" -H "$H2" "$API/repos/ActivePeter/ci-worker/dispatches" \
-    -d "{\"event_type\":\"$EVENT\",\"client_payload\":{\"ref\":\"$ref\",\"group\":\"$group\",\"source\":\"poll\"}}" \
+    -d "$dispatch_payload" \
     || { echo "warn: dispatch failed for $ref"; continue; }
   dispatched=$((dispatched+1))
 done <<< "$work"

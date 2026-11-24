@@ -231,6 +231,17 @@ PPU17_TESTS=(
 )
 
 select_profile() {
+  case "${SGLANG_CI_BASE_REF:-}" in
+    ppu15-0.5.21|ppu-0.5.17-beta)
+      printf '%s\n' "$SGLANG_CI_BASE_REF"
+      return
+      ;;
+    "") ;;
+    *)
+      printf "Unsupported SGLang CI base_ref '%s'; expected ppu15-0.5.21 or ppu-0.5.17-beta.\n" "$SGLANG_CI_BASE_REF" >&2
+      return 2
+      ;;
+  esac
   case "${SGLANG_CI_PROFILE:-}" in
     ppu15-0.5.21|ppu-0.5.17-beta)
       printf '%s\n' "$SGLANG_CI_PROFILE"
@@ -410,14 +421,20 @@ JSON
     unset CUDA_VISIBLE_DEVICES
 
     tests=()
+    missing_tests=()
     for filename in "${selected_tests[@]}"; do
       test_path="$MEM_CACHE_TEST_DIR/$filename"
-      if [[ ! -f "$test_path" ]]; then
-        echo "SGLang CI profile $profile is missing required test file: $test_path" >&2
-        exit 1
+      if [[ -f "$test_path" ]]; then
+        tests+=("$test_path")
+      else
+        missing_tests+=("$test_path")
       fi
-      tests+=("$test_path")
     done
+    if (( ${#missing_tests[@]} )); then
+      printf 'PR 落后 base 分支 %s，请 rebase\n' "$profile" >&2
+      printf '  %s\n' "${missing_tests[@]}" >&2
+      exit 1
+    fi
     echo "Running ${#tests[@]} sglang CPU unit test files (profile $profile):"
     printf '  %s\n' "${tests[@]}"
 
