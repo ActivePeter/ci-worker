@@ -386,6 +386,8 @@ JSON
     case "$profile" in
       ppu15-0.5.21)
         selected_tests=("${PPU15_TESTS[@]}")
+        # Keep CPU fixtures on the Python tree even if a test builds the Rust extension.
+        export SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND=python
         deselect+=(
           # Branch fixtures reference a missing indexer attribute and an unpublished memory namespace.
           --deselect "$MEM_CACHE_TEST_DIR/test_hicache_host_register.py::TestHiCacheHostRegister::test_dsa_page_layouts_with_draft_use_page_registration_granularity"
@@ -420,7 +422,8 @@ JSON
     printf '  %s\n' "${tests[@]}"
 
     export PYTHONPATH="$PWD/python:$PWD/test/registered/unit/mem_cache${PYTHONPATH:+:$PYTHONPATH}"
-    python3 -m pytest -v --noconftest -p no:cacheprovider "${deselect[@]}" "${tests[@]}"
+    # Keep node IDs checkout-relative even when pytest finds config under test/.
+    python3 -m pytest -v --rootdir="$PWD" --noconftest -p no:cacheprovider "${deselect[@]}" "${tests[@]}"
     ;;
   *)
     echo "usage: $0 plan|setup <id>|run <id>|report" >&2

@@ -78,6 +78,7 @@ class SglangEntryTests(unittest.TestCase):
                 self.assertIn(f"pytest arg: {MEM_CACHE_TEST_DIR / marker}\n", result.stdout)
                 self.assertNotIn(other_marker, result.stdout)
                 self.assertIn("CUDA_VISIBLE_DEVICES=unset\n", result.stdout)
+                self.assertIn(f"pytest arg: --rootdir={root}\n", result.stdout)
                 self.assertEqual(result.stdout.count("pytest arg: --deselect\n"), deselected)
                 if profile == "ppu-0.5.17-beta":
                     self.assertIn(
