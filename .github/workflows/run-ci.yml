@@ -37,7 +37,20 @@ permissions:
   contents: read
 
 jobs:
+  # Temporary SGLang proof route for the existing workflow_dispatch entry.
+  sglang:
+    if: (github.event.inputs.target_repo || github.event.client_payload.target_repo) == 'goodputai/sglang'
+    uses: ./.github/workflows/unit.yml
+    with:
+      repo: goodputai/sglang
+      context: ci/public-worker/sglang-unit
+      default_entry: ci/defaults/sglang.sh
+      ref: ${{ github.event.inputs.ref || github.event.client_payload.ref || 'main' }}
+    secrets:
+      GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+
   ci:
+    if: (github.event.inputs.target_repo || github.event.client_payload.target_repo) != 'goodputai/sglang'
     runs-on: ubuntu-latest
     steps:
       - name: Resolve inputs (manual or repository_dispatch)
