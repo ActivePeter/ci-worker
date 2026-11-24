@@ -83,12 +83,13 @@ JSON
     # sglang.srt.mem_cache.cpp_utils.native_hash JIT compilation on Linux CPU.
     sudo apt-get update -qq
     sudo apt-get install -y -qq libssl-dev ninja-build
-    # CPU-only PyTorch wheel avoids multi-GB CUDA downloads on hosted CPU runners.
-    pip_install --index-url https://download.pytorch.org/whl/cpu torch
+    # CPU-only PyTorch wheels avoid multi-GB CUDA downloads on hosted CPU runners.
+    pip_install --index-url https://download.pytorch.org/whl/cpu torch torchvision
     # Minimal runtime + test dependencies needed to import sglang.srt.mem_cache
     # and sglang.srt.managers.scheduler / kv_hints on CPU.
     pip_install \
       pytest \
+      triton \
       ninja \
       setuptools \
       numpy \
