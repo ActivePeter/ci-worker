@@ -1,0 +1,32 @@
+name: poll-sglang
+
+# Every 5 minutes: queue run-sglang-unit for each open non-fork PR head and each
+# protected-branch head of goodputai/sglang that has no ci/public-worker/sglang-unit status yet
+# (logic in ci/poll.sh; protected branches come from GitHub, not from here).
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "only poll this ref (empty = open PR heads + protected branches)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: ci
+      - name: Queue public unit CI for goodputai/sglang refs that need it
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+        run: bash ci/poll.sh goodputai/sglang ci/public-worker/sglang-unit run-sglang-unit "${{ github.event.inputs.ref }}"
