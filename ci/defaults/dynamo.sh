@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# Legacy default entry for goodputai/dynamo, used while the tested SHA has no
-# .github/ci/public-unit.sh: the pure-CPU KVBM shared-host lifecycle checks
-# (port of kvbm-shared-pool-lifecycle.yml), split into independent cargo/
-# maturin jobs. rust-toolchain.toml in the checkout selects the toolchain.
+# Bridge the checkout's input-admission and LLM contracts when declared.
 set -euo pipefail
+
+if [[ -f .github/workflows/release-1.6.1-contracts.yml ]]; then
+  exec /usr/bin/python3 -I "$(dirname "$0")/../workflow.py" dynamo "$@"
+fi
+
+# Preserve the existing KVBM entry for the release 1.4 workflow.
+if [[ ! -f .github/workflows/pre-merge-release-1.4.0.yml && ! -f .github/workflows/kvbm-shared-pool-lifecycle.yml ]]; then
+  printf '该提交无桥接对象：%s（缺少 Dynamo contracts workflow）\n' "${CI_REF_SHA:-$(git rev-parse --short HEAD 2>/dev/null || printf unknown)}" >&2
+  exit 1
+fi
 
 case "$1" in
   plan)

@@ -1,6 +1,6 @@
 name: run-dynamo-unit
 
-# Public CI for goodputai/dynamo (KVBM shared-host CPU unit). Job DAG lives in unit.yml: prepare -> parallel
+# Public CPU contracts for goodputai/dynamo. Job DAG lives in unit.yml: prepare -> parallel
 # jobs from the tested SHA's .github/ci/public-unit.sh (or ci-worker's
 # ci/defaults/dynamo.sh as "legacy default") -> report, the only writer of ci/public-worker/dynamo-unit.
 # Latest wins per PR / branch: a newer head cancels the superseded run.

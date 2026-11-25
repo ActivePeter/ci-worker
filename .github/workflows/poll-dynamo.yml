@@ -1,8 +1,6 @@
 name: poll-dynamo
 
-# Every 5 minutes: queue run-dynamo-unit for each open non-fork PR head and each
-# protected-branch head of goodputai/dynamo that has no ci/public-worker/dynamo-unit status yet
-# (logic in ci/poll.sh; protected branches come from GitHub, not from here).
+# Queue untested branch heads and open non-fork PRs for the Dynamo contract branches.
 
 on:
   schedule:
@@ -10,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "only poll this ref (empty = open PR heads + protected branches)"
+        description: "only poll this eligible ref (empty = both target branches and their open PRs)"
         required: false
         default: ""
 
@@ -29,4 +27,7 @@ jobs:
       - name: Queue public unit CI for goodputai/dynamo refs that need it
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
-        run: bash ci/poll.sh goodputai/dynamo ci/public-worker/dynamo-unit run-dynamo-unit "${{ github.event.inputs.ref }}"
+          POLL_REF: ${{ github.event.inputs.ref }}
+        run: >-
+          bash ci/poll.sh goodputai/dynamo ci/public-worker/dynamo-unit run-dynamo-unit
+          "$POLL_REF" "release/1.6.1,claude/bp890-pickq-1124"

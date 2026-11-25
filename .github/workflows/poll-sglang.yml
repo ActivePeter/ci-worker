@@ -1,0 +1,34 @@
+name: poll-sglang
+
+# Poll open non-fork PRs targeting these branches and the two branch heads.
+# An explicit ref must also be one of those heads.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "only poll this eligible ref (empty = both target branches and their open PRs)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: ci
+      - name: Queue public unit CI for goodputai/sglang refs that need it
+        env:
+          GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+          POLL_REF: ${{ github.event.inputs.ref }}
+        run: >-
+          bash ci/poll.sh goodputai/sglang ci/public-worker/sglang-unit run-sglang-unit
+          "$POLL_REF" "ppu15-0.5.21,ppu-0.5.17-beta"

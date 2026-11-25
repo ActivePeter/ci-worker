@@ -35,9 +35,14 @@ def normalize(plan):
                     or verification["suite"] in suites or not job.get("shared") or not plan.get("report")):
                 raise ValueError(f"invalid verification plan for {ident!r}")
             suites.add(verification["suite"])
+        nextest = str(job.get("nextest", ""))
+        if nextest and not re.fullmatch(r"cargo-nextest@[0-9]+\.[0-9]+\.[0-9]+", nextest):
+            raise ValueError(f"invalid nextest version for {ident!r}")
         jobs.append({
             "id": ident,
-            "timeout": max(1, min(int(job.get("timeout", 20)), 60)),
+            "timeout": max(1, min(int(job.get("timeout", 20)), 90 if nextest else 60)),
+            "nextest": nextest,
+            "git_token": bool(job.get("git_token", False)),
             "python": str(job.get("python", "")),
             "shared": bool(job.get("shared", False)),
             "verification": verification,
