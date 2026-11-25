@@ -10,21 +10,27 @@ from pathlib import Path
 import yaml
 
 
-ACTIONS = {
-    "actions/checkout": "unit checkout at the tested SHA",
-    "actions/setup-python": "unit setup-python using the source step's version",
-    "taiki-e/install-action": "unit nextest installer using the source step's tool",
-    "goodputai/goodput-infer-ext/.github/actions/gie-git-auth": "ci/git-auth.sh",
-    "astral-sh/setup-uv": "unit setup-uv",
-    "actions/cache": "optional source cache, omitted",
-    "actions/cache/restore": "optional source cache, omitted",
-    "actions/cache/save": "optional source cache, omitted",
-    "actions/upload-artifact": "unit job receipt, source-specific artifact omitted",
-    "actions/download-artifact": "SGLang source-build fallback",
-    "Swatinem/rust-cache": "SGLang source-build fallback without source cache",
-    "./.github/actions/check-pr-test-health": "source PR orchestration, omitted",
-    "./.github/actions/check-maintenance": "source PR orchestration, omitted",
-    "./.github/actions/download-rust-ext": "SGLang source-build fallback",
+DYNAMO_ACTIONS = {
+    "actions/checkout": {"persist-credentials"},
+    "actions/setup-python": {"python-version"},
+    "taiki-e/install-action": {"tool"},
+    "goodputai/goodput-infer-ext/.github/actions/gie-git-auth": {"token", "lockfile"},
+    "actions/cache/restore": {"path", "key", "restore-keys"},
+    "actions/cache/save": {"path", "key"},
+    "actions/upload-artifact": {"name", "include-hidden-files", "path"},
+}
+SGLANG_ACTIONS = {
+    "actions/checkout": {"ref"},
+    "actions/setup-python": {"python-version"},
+    "astral-sh/setup-uv": set(),
+    "actions/cache": {"path", "key", "restore-keys"},
+    "actions/cache/restore": {"path", "key", "restore-keys"},
+    "actions/cache/save": {"path", "key"},
+    "actions/download-artifact": {"name", "path"},
+    "Swatinem/rust-cache": {"workspaces", "shared-key", "save-if"},
+    "./.github/actions/check-pr-test-health": set(),
+    "./.github/actions/check-maintenance": set(),
+    "./.github/actions/download-rust-ext": {"artifact_name"},
 }
 EXPRESSION = re.compile(r"\$\{\{\s*(.*?)\s*\}\}")
 TOKEN_REF = "secrets.GIE_GIT_TOKEN"
@@ -112,6 +118,7 @@ def position(path):
 class Workflow:
     def __init__(self, path, engine):
         self.engine = engine
+        self.actions = SGLANG_ACTIONS if engine == "sglang" else DYNAMO_ACTIONS
         self.data = yaml.safe_load(path.read_text())
         self.environment = dict(os.environ, GITHUB_WORKSPACE=str(Path.cwd()))
         token = self.environment.pop("GIE_GIT_TOKEN", "")
@@ -126,17 +133,19 @@ class Workflow:
             self.conditions.update(SGLANG_CONDITIONS)
         self.defaults = defaults(self.data)
 
-    def expand(self, value, *, allow_secret=False):
+    def expand(self, value, *, allow_secret=False, local=None):
         if isinstance(value, bool):
             return str(value).lower()
+
+        expressions = self.expressions | (local or {})
 
         def substitute(match):
             expression = match[1].strip()
             if expression == TOKEN_REF and not allow_secret:
                 raise ValueError("workflow secrets are supported only in env")
-            if expression not in self.expressions:
+            if expression not in expressions:
                 raise ValueError(f"unsupported workflow expression: {expression}")
-            return self.expressions[expression]
+            return expressions[expression]
 
         value = EXPRESSION.sub(substitute, str(value))
         if "${{" in value:
@@ -195,8 +204,11 @@ class Workflow:
                 raise ValueError("workflow step requires exactly one of uses or run")
             if "uses" in step:
                 action = step["uses"].split("@", 1)[0]
-                if action not in ACTIONS:
-                    raise ValueError(f"unsupported workflow action: {action}")
+                if action not in self.actions:
+                    raise ValueError(f"unsupported workflow action for {self.engine}: {action}")
+                unsupported = set(step.get("with", {})) - self.actions[action]
+                if unsupported:
+                    raise ValueError(f"unsupported workflow action inputs for {action}: {', '.join(sorted(unsupported))}")
                 if active and action == "actions/setup-python":
                     settings["python"] = self.expand(step["with"]["python-version"])
                 if active and action == "taiki-e/install-action":
@@ -211,6 +223,8 @@ class Workflow:
                 command = 'set -o pipefail\n{\n' + command.rstrip() + '\n} 2>&1 | tee "$CI_OUT/run-suite.log"'
             working = self.expand(step.get("working-directory", job_defaults.get("working-directory", ".")))
             step_timeout = int(self.expand(step.get("timeout-minutes", job_timeout)))
+            if is_sglang_suite:
+                settings["run_timeout"] = step_timeout
             if active:
                 steps.append((step, command, values, shell, working, step_timeout))
         if not steps or (self.engine == "sglang" and test_steps != 1):
@@ -253,19 +267,19 @@ def sglang_pr_continue_on_error(workflow):
     source = Path(".github/workflows/_pr-test-check-changes.yml")
     steps = yaml.safe_load(source.read_text())["jobs"]["run"]["steps"]
     commands = {step["id"]: step["run"] for step in steps if "id" in step and "run" in step}
-    workflow.expressions.update({
+    context = {
         "github.event_name": "pull_request",
         "github.event_name == 'schedule'": "false",
         "inputs.run_all_tests": "false",
         "inputs.force_continue_on_error": "false",
-    })
+    }
     with tempfile.TemporaryDirectory(prefix="ci22-sglang-check-") as directory:
         output = Path(directory) / "output"
 
         def run(step, field):
             output.write_text("")
             subprocess.run(
-                ["bash", "-e", "-c", workflow.expand(commands[step])],
+                ["bash", "-e", "-c", workflow.expand(commands[step], local=context)],
                 env=dict(workflow.environment, GITHUB_OUTPUT=str(output)),
                 check=True, stdout=subprocess.DEVNULL,
             )
@@ -274,7 +288,7 @@ def sglang_pr_continue_on_error(workflow):
                 raise ValueError(f"SGLang check-changes did not emit boolean {field}")
             return value
 
-        workflow.expressions["steps.run-mode.outputs.run_all_tests"] = run("run-mode", "run_all_tests")
+        context["steps.run-mode.outputs.run_all_tests"] = run("run-mode", "run_all_tests")
         value = run("set-continue-on-error", "continue_on_error")
     return "--continue-on-error" if value == "true" else ""
 

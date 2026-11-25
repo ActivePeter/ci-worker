@@ -53,7 +53,24 @@ class DynamoWorkflowTests(unittest.TestCase):
         self.data["jobs"]["cpu-contracts"]["steps"] = [{"uses": "./.github/actions/real-tests"}]
         result = self.entry("plan")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("unsupported workflow action: ./.github/actions/real-tests", result.stderr)
+        self.assertIn("unsupported workflow action for dynamo: ./.github/actions/real-tests", result.stderr)
+
+    def test_sglang_action_is_rejected_for_dynamo(self):
+        self.data["jobs"]["cpu-contracts"]["steps"].insert(
+            0, {"uses": "./.github/actions/check-maintenance"},
+        )
+        result = self.entry("plan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported workflow action for dynamo: ./.github/actions/check-maintenance",
+                      result.stderr)
+
+    def test_checkout_submodules_is_rejected(self):
+        self.data["jobs"]["cpu-contracts"]["steps"].insert(
+            0, {"uses": "actions/checkout@v4", "with": {"submodules": True}},
+        )
+        result = self.entry("plan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported workflow action inputs for actions/checkout: submodules", result.stderr)
 
     def test_unsupported_job_expression_fails_plan(self):
         self.data["jobs"]["cpu-contracts"]["env"] = {"SHA": "${{ github.sha }}"}

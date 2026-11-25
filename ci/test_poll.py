@@ -20,7 +20,7 @@ def pull(number, base, repo=REPO):
 
 
 class PollTests(unittest.TestCase):
-    def run_poll(self, responses, *, target_branches=None, only=""):
+    def run_poll(self, responses, *, target_branches=None, only="", fail_dispatch=False):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = root / "responses.json"
@@ -51,6 +51,8 @@ if method == "GET":
     print(json.dumps(response))
     if "-w" in args:
         print(status)
+elif endpoint.endswith("/dispatches") and os.environ["MOCK_FAIL_DISPATCH"] == "1":
+    sys.exit(22)
 """
             )
             curl.chmod(0o755)
@@ -60,6 +62,7 @@ if method == "GET":
                 GIE_GIT_TOKEN="test-token",
                 MOCK_RESPONSES=str(fixture),
                 MOCK_REQUESTS=str(requests),
+                MOCK_FAIL_DISPATCH="1" if fail_dispatch else "0",
             )
             command = ["bash", str(POLL), REPO, "test/context", "run-test", only]
             if target_branches is not None:
@@ -123,6 +126,29 @@ if method == "GET":
         self.assertIn("warning::target branch release/a was not found", result.stderr)
         self.assertEqual([body["client_payload"]["ref"] for method, endpoint, body in requests
                           if method == "POST" and endpoint.endswith("/dispatches")], ["bb"])
+
+    def test_dispatch_failure_is_retried_without_requeuing_test_failures(self):
+        responses = {
+            f"repos/{REPO}/pulls?state=open&per_page=100&page=1": [pull(1, "release/a")],
+            f"repos/{REPO}/branches/release%2Fa": {"name": "release/a", "commit": {"sha": "ba"}},
+            f"repos/{REPO}/commits/ba/status": {"statuses": []},
+            f"repos/{REPO}/commits/p001/status": {
+                "statuses": [{"context": "test/context", "state": "failure", "description": "tests failed"}],
+            },
+        }
+        failed, requests = self.run_poll(responses, target_branches="release/a", fail_dispatch=True)
+        self.assertEqual(failed.returncode, 0, failed.stderr)
+        self.assertIn("dispatch failed for ba", failed.stdout)
+        statuses = [body for method, endpoint, body in requests
+                    if method == "POST" and endpoint.endswith("/statuses/ba")]
+        self.assertEqual([status["state"] for status in statuses], ["pending", "failure"])
+        responses[f"repos/{REPO}/commits/ba/status"] = {"statuses": [statuses[-1]]}
+        responses[f"repos/{REPO}/commits/ba"] = {"sha": "ba"}
+        retried, requests = self.run_poll(responses, target_branches="release/a", only="ba")
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertIn("dispatched=1", retried.stdout)
+        self.assertEqual([body["client_payload"]["ref"] for method, endpoint, body in requests
+                          if method == "POST" and endpoint.endswith("/dispatches")], ["ba"])
 
     def test_without_whitelist_keeps_legacy_pr_and_protected_branch_selection(self):
         result, requests = self.run_poll({

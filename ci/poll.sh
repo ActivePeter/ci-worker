@@ -15,6 +15,13 @@ API="https://api.github.com"
 H1="Authorization: token ${TOKEN}"
 H2="Accept: application/vnd.github+json"
 get() { curl -fsS -H "$H1" -H "$H2" "$API/$1"; }
+retry_description="poll dispatch failed; retry next poll"
+mark() {
+  local ref=$1 state=$2 description=$3
+  curl -fsS -X POST -H "$H1" -H "$H2" "$API/repos/$REPO/statuses/$ref" \
+    -d "$(jq -cn --arg state "$state" --arg ctx "$CTX" --arg description "$description" \
+      '{state:$state,context:$ctx,description:$description}')" >/dev/null
+}
 
 allowed_prs() {
   local page=1 body size
@@ -83,17 +90,26 @@ while read -r ref group; do
   if ! body=$(get "repos/$REPO/commits/$ref/status"); then
     echo "skip $ref (status fetch failed)"; continue
   fi
-  state=$(printf '%s' "$body" | jq -r --arg ctx "$CTX" \
-    '[.statuses[]? | select(.context==$ctx)] | sort_by(.updated_at) | .[-1].state // empty')
-  if [ -n "$state" ]; then echo "skip $ref $group (latest=$state)"; continue; fi
+  latest=$(jq -c --arg ctx "$CTX" '
+    [.statuses[]? | select(.context==$ctx)] | sort_by(.updated_at) | .[-1] // {}' <<< "$body")
+  state=$(jq -r '.state // empty' <<< "$latest")
+  description=$(jq -r '.description // empty' <<< "$latest")
+  if [ -n "$state" ] && { [ "$state" != failure ] || [ "$description" != "$retry_description" ]; }; then
+    echo "skip $ref $group (latest=$state)"
+    continue
+  fi
   echo "queue $ref $group"
   dispatch_payload="{\"event_type\":\"$EVENT\",\"client_payload\":{\"ref\":\"$ref\",\"group\":\"$group\",\"source\":\"poll\"}}"
-  curl -fsS -X POST -H "$H1" -H "$H2" "$API/repos/$REPO/statuses/$ref" \
-    -d "{\"state\":\"pending\",\"context\":\"$CTX\",\"description\":\"queued by poll\"}" >/dev/null \
-    || { echo "warn: pending-mark failed for $ref"; continue; }
-  curl -fsS -X POST -H "$H1" -H "$H2" "$API/repos/ActivePeter/ci-worker/dispatches" \
-    -d "$dispatch_payload" \
-    || { echo "warn: dispatch failed for $ref"; continue; }
+  mark "$ref" pending "queued by poll" || { echo "warn: pending-mark failed for $ref"; continue; }
+  if ! curl -fsS -X POST -H "$H1" -H "$H2" "$API/repos/ActivePeter/ci-worker/dispatches" \
+        -d "$dispatch_payload"; then
+    echo "warn: dispatch failed for $ref"
+    mark "$ref" failure "$retry_description" || {
+      echo "::error::dispatch failure could not be recorded for $ref" >&2
+      exit 1
+    }
+    continue
+  fi
   dispatched=$((dispatched+1))
 done <<< "$work"
 echo "::notice::poll $REPO dispatched=$dispatched"

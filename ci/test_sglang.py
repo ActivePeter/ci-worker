@@ -81,6 +81,18 @@ class SglangEntryTests(unittest.TestCase):
         self.assertEqual((self.src / "run-suite.log").read_text(),
                          "run-from-checkout base-a-test-cpu --auto-partition-id 1 --auto-partition-size 3 --partition-model-file /tmp/partition-model.json --fork-worker-batch-size 20\ntrue true flag=[]\n")
 
+    def test_each_shard_uses_the_callers_run_timeout(self):
+        caller = self.workflow.parent / "pr-test.yml"
+        for minutes in ("7", "23"):
+            with self.subTest(minutes=minutes):
+                data = json.loads(caller.read_text())
+                data["jobs"]["base-a-test-cpu"]["with"]["run_timeout_minutes"] = minutes
+                caller.write_text(json.dumps(data))
+                result = self.entry("plan")
+                result.check_returncode()
+                shards = json.loads(result.stdout)["jobs"]
+                self.assertEqual([shard["run_timeout"] for shard in shards], [int(minutes)] * 3)
+
     def test_source_can_enable_continue_on_error(self):
         source = self.check_changes.read_text().replace("run_all_tests=false", "run_all_tests=true")
         self.check_changes.write_text(source)
