@@ -55,11 +55,7 @@ SGLANG_EXPRESSIONS = {
     "steps.hf_cache_before.outputs.bytes": "0",
     "inputs.self_name": "base-a-test-cpu",
 }
-SGLANG_PARTITION_OPTIONS = (
-    " --auto-partition-id ${{ matrix.partition }}",
-    " --auto-partition-size ${{ fromJson(inputs.partitions)[inputs.self_name].size }}",
-    " --partition-model-file /tmp/partition-model.json",
-)
+
 
 
 def defaults(mapping):
@@ -173,16 +169,20 @@ class Workflow:
         job_defaults = self.defaults | defaults(job)
         self.environment_for(self.data, job)
         job_timeout = int(self.expand(job.get("timeout-minutes", 60)))
-        self.expressions["fromJson(inputs.run_timeout_minutes)"] = str(job_timeout)
+        self.expressions.setdefault("fromJson(inputs.run_timeout_minutes)", str(job_timeout))
         steps = []
         settings = {"id": name, "timeout": job_timeout}
         scopes = [self.data, job]
         test_steps = 0
         for step in job["steps"]:
+            active = self.active(step.get("if", ""))
             unknown = set(step) - SUPPORTED_EXECUTION_KEYS
+            # The upstream artifact download is not selected without an artifact.
+            if (self.engine == "sglang" and not active
+                    and step.get("uses", "").startswith("actions/download-artifact@")):
+                unknown.discard("continue-on-error")
             if unknown:
                 raise ValueError(f"unsupported workflow step keys: {', '.join(sorted(unknown))}")
-            active = self.active(step.get("if", ""))
             scopes.append(step)
             values = self.environment_for(step)
             shell = self.expand(step.get("shell", job_defaults.get("shell", "")))
@@ -203,8 +203,6 @@ class Workflow:
             is_sglang_suite = self.engine == "sglang" and "run_suite.py" in command
             if is_sglang_suite:
                 test_steps += 1
-                for option in SGLANG_PARTITION_OPTIONS:
-                    command = command.replace(option, "")
             command = self.expand(command)
             if is_sglang_suite:
                 command = 'set -o pipefail\n{\n' + command.rstrip() + '\n} 2>&1 | tee "$CI_OUT/run-suite.log"'
@@ -248,6 +246,28 @@ class Workflow:
         sys.exit(failed)
 
 
+def sglang_partitions(stage):
+    caller = Path(".github/workflows/pr-test.yml")
+    upstream = yaml.safe_load(caller.read_text())["jobs"]["base-a-test-cpu"]
+    if upstream.get("uses") != f"./{stage}":
+        raise ValueError("SGLang CPU suite does not call the expected source stage")
+    parameters = upstream["with"]
+    suite = parameters["self_name"]
+    minutes = int(parameters["run_timeout_minutes"])
+    if minutes < 1:
+        raise ValueError("SGLang CPU suite timeout must be positive")
+    result = subprocess.run(
+        [sys.executable, "-I", "scripts/ci/utils/compute_partitions.py",
+         "--output-format", "json", "--pr-test-yml", str(caller), "--full-parallel", "true"],
+        check=True, stdout=subprocess.PIPE, text=True,
+    )
+    layout = json.loads(result.stdout)[suite]
+    size, indices = layout["size"], layout["arr"]
+    if not isinstance(size, int) or size < 1 or sorted(indices) != list(range(size)):
+        raise ValueError("SGLang partition plan has invalid indices")
+    return suite, size, indices, minutes
+
+
 def main():
     engine, mode, *args = sys.argv[1:]
     if mode == "report":
@@ -257,7 +277,7 @@ def main():
         selected = {"cpu-contracts": "cpu-contracts", "rust-contracts": "rust-contracts"}
     else:
         path = Path(".github/workflows/_pr-test-stage-cpu.yml")
-        selected = {"cpu-unit": "run"}
+        selected = {}
     if not path.is_file():
         raise ValueError(f"该提交无桥接对象：缺少 {path}")
     workflow = Workflow(path, engine)
@@ -265,7 +285,24 @@ def main():
     missing = set(selected.values()) - jobs.keys()
     if missing:
         raise ValueError(f"该提交无桥接对象：{path} 缺少 {', '.join(sorted(missing))}")
-    entries = {name: workflow.describe(name, jobs[key]) for name, key in selected.items()}
+    if engine == "sglang":
+        if "run" not in jobs:
+            raise ValueError("SGLang CPU stage has no run job")
+        suite, size, indices, minutes = sglang_partitions(path)
+        selected = {f"cpu-unit-{partition}": "run" for partition in indices}
+        entries = {}
+        for name, partition in zip(selected, indices):
+            if mode != "plan" and args != [name]:
+                continue
+            workflow.expressions.update({
+                "inputs.self_name": suite,
+                "matrix.partition": str(partition),
+                "fromJson(inputs.partitions)[inputs.self_name].size": str(size),
+                "fromJson(inputs.run_timeout_minutes)": str(minutes),
+            })
+            entries[name] = workflow.describe(name, jobs["run"])
+    else:
+        entries = {name: workflow.describe(name, jobs[key]) for name, key in selected.items()}
     if mode == "plan" and not args:
         print(json.dumps({"version": 1, "report": False, "jobs": [row[0] for row in entries.values()]}))
         return

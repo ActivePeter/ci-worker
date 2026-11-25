@@ -19,6 +19,18 @@ class SglangEntryTests(unittest.TestCase):
         self.workflow = self.src / ".github/workflows/_pr-test-stage-cpu.yml"
         self.workflow.parent.mkdir(parents=True)
         (self.src / "test").mkdir()
+        (self.workflow.parent / "pr-test.yml").write_text(json.dumps({"jobs": {
+            "base-a-test-cpu": {"uses": "./.github/workflows/_pr-test-stage-cpu.yml",
+                                "with": {"self_name": "base-a-test-cpu", "run_timeout_minutes": "12"}},
+        }}))
+        calculator = self.src / "scripts/ci/utils/compute_partitions.py"
+        calculator.parent.mkdir(parents=True)
+        calculator.write_text(
+            "import json, sys\n"
+            "assert sys.argv[1:] == ['--output-format', 'json', '--pr-test-yml', "
+            "'.github/workflows/pr-test.yml', '--full-parallel', 'true']\n"
+            "print(json.dumps({'base-a-test-cpu': {'size': 3, 'arr': [0, 1, 2], 'max_parallel': 3}}))\n"
+        )
         self.data = {
             "env": {"SGLANG_IS_IN_CI": True, "ADDED_WORKFLOW_FLAG": "workflow"},
             "jobs": {"run": {
@@ -29,7 +41,8 @@ class SglangEntryTests(unittest.TestCase):
                     {"run": "echo rust-from-checkout"},
                     {"run": 'echo "install-from-checkout $ADDED_WORKFLOW_FLAG $ADDED_JOB_FLAG $UV_SYSTEM_PYTHON"',
                      "env": {"UV_SYSTEM_PYTHON": "1"}},
-                    {"env": {"SGLANG_SKIP_RUST_TESTS": "${{ fromJson(inputs.check_changes).rust_workspace == 'true' && 'false' || 'true' }}"},
+                    {"timeout-minutes": "${{ fromJson(inputs.run_timeout_minutes) }}",
+                     "env": {"SGLANG_SKIP_RUST_TESTS": "${{ fromJson(inputs.check_changes).rust_workspace == 'true' && 'false' || 'true' }}"},
                      "run": 'cd test/\n# run_suite.py\n'
                             'echo "run-from-checkout ${{ inputs.self_name }} --auto-partition-id ${{ matrix.partition }}'
                             ' --auto-partition-size ${{ fromJson(inputs.partitions)[inputs.self_name].size }}'
@@ -50,15 +63,15 @@ class SglangEntryTests(unittest.TestCase):
         result = self.entry("plan")
         result.check_returncode()
         jobs, report = plan.normalize(json.loads(result.stdout))
-        self.assertEqual([(job["id"], job["python"]) for job in jobs], [("cpu-unit", "3.11")])
+        self.assertEqual([(job["id"], job["python"]) for job in jobs], [("cpu-unit-0", "3.11"), ("cpu-unit-1", "3.11"), ("cpu-unit-2", "3.11")])
         self.assertFalse(report)
 
     def test_run_uses_checkout_steps_and_propagates_suite_failure(self):
-        result = self.entry("run", "cpu-unit")
+        result = self.entry("run", "cpu-unit-1")
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertIn("install-from-checkout workflow job 1", result.stdout)
         self.assertEqual((self.src / "run-suite.log").read_text(),
-                         "run-from-checkout base-a-test-cpu --fork-worker-batch-size 20\ntrue true\n")
+                         "run-from-checkout base-a-test-cpu --auto-partition-id 1 --auto-partition-size 3 --partition-model-file /tmp/partition-model.json --fork-worker-batch-size 20\ntrue true\n")
 
     def test_step_environment_rejects_unknown_expression(self):
         self.data["jobs"]["run"]["steps"][1]["env"] = {"OTHER": "${{ unknown.context }}"}
