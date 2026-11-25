@@ -21,87 +21,115 @@ workflow, mode, *args = sys.argv[1:]
 if mode == "report":
     sys.exit(0)
 
-upstream = yaml.safe_load(Path(workflow).read_text())["jobs"]
-cpu, rust = upstream["cpu-contracts"], upstream["rust-contracts"]
-cpu_steps = {step.get("name"): step for step in cpu["steps"]}
-rust_steps = {step.get("name"): step for step in rust["steps"]}
-cpu_install = (
-    "Install CPU test dependencies",
-    "Install input admission CPU dependencies",
-)
-cpu_test = "Test input admission against the installed extension"
-rust_setup = (
-    "Prepare pinned Harmony vocabularies before parallel tests",
-    "Install JUnit policy dependencies",
-    "Install native build prerequisites and local NATS",
-    "Install components for the repository Rust toolchain",
-    "Prepare verified Harmony vocabulary",
-)
+jobs = yaml.safe_load(Path(workflow).read_text()).get("jobs", {})
+if not {"cpu-contracts", "rust-contracts"} <= jobs.keys():
+    sys.exit(f"该提交无桥接对象：{workflow} 缺少 cpu-contracts 或 rust-contracts")
+cpu, rust = jobs["cpu-contracts"], jobs["rust-contracts"]
 rust_labels = ("llm-unit", "llm-http-batch", "llm-http-nvext")
-rust_commands = {}
-for step in rust["steps"]:
-    lines = step.get("run", "").replace("\\\n", " ").splitlines()
-    gates = [line for line in lines if ".github/ci/run_rust_gate.py" in line]
-    if not gates:
-        continue
-    preamble = lines[:lines.index(gates[0])]
-    for gate in gates:
-        match = re.search(r"--label (\S+)", gate)
-        if match and match[1] in rust_labels:
-            rust_commands[match[1]] = (step, "\n".join([*preamble, gate]))
+gate_label = re.compile(r"--label (\S+)")
 
-for label in rust_labels[:2]:
-    if label not in rust_commands:
-        sys.exit(f"{workflow} does not register the required Rust contract {label}")
+
+def gate_lines(command):
+    return command.replace("\\\n", " ").splitlines()
+
+
+def is_gate(line):
+    return ".github/ci/run_rust_gate.py" in line and gate_label.search(line) is not None
+
+
+registered = {
+    gate_label.search(line)[1]
+    for step in rust["steps"]
+    for line in gate_lines(step.get("run", ""))
+    if is_gate(line)
+}
+
+
+def action_value(job, action, key):
+    return next(
+        (step["with"][key] for step in job["steps"]
+         if step.get("uses", "").startswith(action + "@") and key in step.get("with", {})),
+        "",
+    )
+
 
 if mode == "plan" and not args:
-    python = next(step["with"]["python-version"] for step in cpu["steps"]
-                  if step.get("uses", "").startswith("actions/setup-python@"))
-    nextest = rust_steps["Install pinned nextest and gate dependencies"]["with"]["tool"]
-    jobs = [{"id": "cpu-contracts", "timeout": cpu["timeout-minutes"], "python": python}]
-    jobs.extend({"id": label, "timeout": rust["timeout-minutes"], "nextest": nextest}
-                for label in rust_labels if label in rust_commands)
-    print(json.dumps({"version": 1, "report": False, "jobs": jobs}))
+    python = action_value(cpu, "actions/setup-python", "python-version")
+    nextest = action_value(rust, "taiki-e/install-action", "tool")
+    matrix = [{"id": "cpu-contracts", "timeout": cpu["timeout-minutes"], "python": python}]
+    matrix.extend({"id": label, "timeout": rust["timeout-minutes"], "nextest": nextest}
+                  for label in rust_labels if label in registered)
+    print(json.dumps({"version": 1, "report": False, "jobs": matrix}))
     sys.exit(0)
 if mode not in {"setup", "run"} or len(args) != 1:
     sys.exit(f"invalid Dynamo entry invocation: {sys.argv[2:]}")
 
+ident = args[0]
+if ident != "cpu-contracts" and ident not in registered.intersection(rust_labels):
+    sys.exit(f"unknown Dynamo contract {ident}")
+if mode == "setup":
+    sys.exit(0)
+
+job = cpu if ident == "cpu-contracts" else rust
 env = dict(os.environ, GITHUB_WORKSPACE=str(Path.cwd()))
+secret = env.pop("GIE_GIT_TOKEN", "")
+env.update({key: str(value) for key, value in job.get("env", {}).items()})
 
 
-def run_step(step, command=None):
+def apply_environment_file(path, offset):
+    if not path or not Path(path).exists():
+        return
+    with open(path) as stream:
+        stream.seek(offset)
+        for record in stream:
+            key, separator, value = record.rstrip("\n").partition("=")
+            if not separator:
+                sys.exit(f"unsupported workflow environment record in {path}")
+            env[key] = value
+
+
+failed = 0
+for step in job["steps"]:
+    if "run" not in step:
+        continue
+    condition = step.get("if", "").strip()
+    if condition == "runner.environment == 'self-hosted'":
+        continue
+    if condition not in {"", "always()"}:
+        sys.exit(f"unsupported Dynamo workflow step condition: {condition}")
+    if failed and condition != "always()":
+        continue
+    command = step["run"]
+    if ident != "cpu-contracts":
+        lines = gate_lines(command)
+        if any(is_gate(line) for line in lines):
+            command = "\n".join(
+                line for line in lines if not is_gate(line) or gate_label.search(line)[1] == ident
+            )
     step_env = env.copy()
     for key, value in step.get("env", {}).items():
         if value == "${{ secrets.GIE_GIT_TOKEN }}":
-            if not step_env.get(key):
-                sys.exit(f"{key} is required by {step['name']}")
+            if key != "GIE_GIT_TOKEN" or not secret:
+                sys.exit(f"{key} is required by {step.get('name', 'the Dynamo step')}")
+            step_env[key] = secret
             continue
         value = str(value).replace("${{ runner.temp }}", env.get("RUNNER_TEMP", ""))
         if "${{" in value:
-            sys.exit(f"unsupported GitHub expression for {key} in {step['name']}")
+            sys.exit(f"unsupported GitHub expression for {key}")
         step_env[key] = value
-    command = step["run"] if command is None else command
     if "${{" in command:
-        sys.exit(f"unsupported GitHub expression in {step['name']}")
-    print(f"{workflow}: {step['name']} ({args[0]})", flush=True)
-    result = subprocess.run(["bash", "-eo", "pipefail", "-c", command], env=step_env)
-    if result.returncode:
-        sys.exit(result.returncode)
+        sys.exit(f"unsupported GitHub expression in {step.get('name', 'the Dynamo step')}")
+    env_file = env.get("GITHUB_ENV")
+    before = Path(env_file).stat().st_size if env_file and Path(env_file).exists() else 0
+    print(f"{workflow}: {step.get('name', 'run')} ({ident})", flush=True)
+    result = subprocess.run(
+        ["bash", "-eo", "pipefail", "-c", command],
+        env=step_env, cwd=step.get("working-directory"),
+    )
+    apply_environment_file(env_file, before)
+    failed = failed or result.returncode
+sys.exit(failed)
 
-
-job = args[0]
-if job == "cpu-contracts":
-    for name in cpu_install if mode == "setup" else (cpu_test,):
-        run_step(cpu_steps[name])
-elif job in rust_commands:
-    env.update({key: str(value) for key, value in rust.get("env", {}).items()})
-    if mode == "setup":
-        for name in rust_setup:
-            run_step(rust_steps[name])
-    else:
-        run_step(*rust_commands[job])
-else:
-    sys.exit(f"unknown Dynamo contract {job}")
 PYTHON
 fi
 

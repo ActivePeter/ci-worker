@@ -22,12 +22,12 @@ class SglangEntryTests(unittest.TestCase):
         workflow.write_text(json.dumps({"env": {"SGLANG_IS_IN_CI": True, "USE_VENV": False}, "jobs": {"run": {
             "timeout-minutes": 240,
             "steps": [
-                {"name": "Set up Python", "with": {"python-version": "3.11"}},
-                {"name": "Install protoc + Rust toolchain", "run": "echo rust-from-checkout"},
+                {"name": "Python from source", "uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}},
+                {"name": "Install protoc + Rust toolchain", "run": "echo rust-from-checkout # install_rust_protoc.sh"},
                 {"name": "Install dependencies", "env": {"UV_SYSTEM_PYTHON": "1"},
-                 "run": 'echo "install-from-checkout UV_SYSTEM_PYTHON=$UV_SYSTEM_PYTHON"'},
+                 "run": 'echo "install-from-checkout UV_SYSTEM_PYTHON=$UV_SYSTEM_PYTHON" # uv pip install'},
                 {"name": "Run test", "env": {"SGLANG_SKIP_RUST_TESTS": "${{ fixture }}"},
-                 "run": 'cd test/\n'
+                 "run": 'cd test/\n# run_suite.py\n'
                         'echo "run-from-checkout ${{ inputs.self_name }} --auto-partition-id ${{ matrix.partition }}'
                         ' --auto-partition-size ${{ fromJson(inputs.partitions)[inputs.self_name].size }}'
                         ' --partition-model-file /tmp/model.json --fork-worker-batch-size 20 $CONTINUE_ON_ERROR_FLAG"\n'

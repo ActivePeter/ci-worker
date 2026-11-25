@@ -303,8 +303,6 @@ jobs:
       - name: setup ${{ matrix.id }}
         if: steps.verified.outputs.skip != 'true'
         working-directory: src
-        env:
-          GIE_GIT_TOKEN: ${{ inputs.repo == 'goodputai/dynamo' && needs.prepare.outputs.kind == 'legacy' && matrix.id == 'cpu-contracts' && secrets.GIE_GIT_TOKEN || '' }}
         run: |
           if [[ "$CI_JOB" == static && "${{ inputs.repo }}" == goodputai/test && "$TEST_UNIT_SETUP" == nix && "${{ inputs.test_nix_cache }}" == true ]]; then
             TEST_UNIT_SETUP=nix bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"
@@ -314,6 +312,8 @@ jobs:
       - name: run ${{ matrix.id }}
         if: steps.verified.outputs.skip != 'true'
         working-directory: src
+        env:
+          GIE_GIT_TOKEN: ${{ inputs.repo == 'goodputai/dynamo' && needs.prepare.outputs.kind == 'legacy' && matrix.id == 'cpu-contracts' && secrets.GIE_GIT_TOKEN || '' }}
         run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
       - name: Save Nix cache (main static job only)
         if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id == 'static' && github.ref == 'refs/heads/main'

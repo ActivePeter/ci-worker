@@ -19,11 +19,14 @@ if mode not in {"plan", "setup", "run"} or (mode != "plan" and args != ["cpu-uni
 
 stage = yaml.safe_load(Path(".github/workflows/_pr-test-stage-cpu.yml").read_text())
 job = stage["jobs"]["run"]
-steps = {step.get("name"): step for step in job["steps"]}
+steps = job["steps"]
 if mode == "plan":
     print(json.dumps({"version": 1, "report": False, "jobs": [{
         "id": "cpu-unit",
-        "python": steps["Set up Python"]["with"]["python-version"],
+        "python": next(
+            step["with"]["python-version"] for step in steps
+            if step.get("uses", "").startswith("actions/setup-python@")
+        ),
         "timeout": job["timeout-minutes"],
     }]}))
     sys.exit(0)
@@ -34,11 +37,19 @@ for name in ("SGLANG_IS_IN_CI", "USE_VENV"):
 
 if mode == "setup":
     # The worker has no upstream rust-ext-build artifact.
-    install = steps["Install dependencies"]
-    env["UV_SYSTEM_PYTHON"] = str(install["env"]["UV_SYSTEM_PYTHON"])
-    command = steps["Install protoc + Rust toolchain"]["run"] + "\n" + install["run"]
+    install_steps = [
+        step for step in steps
+        if any(marker in step.get("run", "") for marker in ("install_rust_protoc.sh", "uv pip install"))
+    ]
+    for step in install_steps:
+        step_env = dict(env, **{key: str(value) for key, value in step.get("env", {}).items()
+                               if "${{" not in str(value)})
+        result = subprocess.call(["bash", "-eo", "pipefail", "-c", step["run"]], env=step_env)
+        if result:
+            sys.exit(result)
+    sys.exit(0)
 else:
-    run_step = steps["Run test"]
+    run_step = next(step for step in steps if "run_suite.py" in step.get("run", ""))
     if "SGLANG_SKIP_RUST_TESTS" in run_step.get("env", {}):
         # The upstream rust_workspace expression defaults to skipping Rust tests.
         env["SGLANG_SKIP_RUST_TESTS"] = "true"
