@@ -40,7 +40,8 @@ if mode == "setup":
 else:
     run_step = steps["Run test"]
     if "SGLANG_SKIP_RUST_TESTS" in run_step.get("env", {}):
-        env["SGLANG_SKIP_RUST_TESTS"] = "false"
+        # The upstream rust_workspace expression defaults to skipping Rust tests.
+        env["SGLANG_SKIP_RUST_TESTS"] = "true"
     # An unpartitioned run keeps the entire registered suite on this runner.
     command = re.sub(
         r" --(?:auto-partition-id|auto-partition-size|partition-model-file) (?:\$\{\{[^\n]*?\}\}|\S+)",

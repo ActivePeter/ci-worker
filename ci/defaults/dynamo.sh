@@ -1,9 +1,115 @@
 #!/usr/bin/env bash
-# Legacy default entry for goodputai/dynamo, used while the tested SHA has no
-# .github/ci/public-unit.sh: the pure-CPU KVBM shared-host lifecycle checks
-# (port of kvbm-shared-pool-lifecycle.yml), split into independent cargo/
-# maturin jobs. rust-toolchain.toml in the checkout selects the toolchain.
+# Bridge the checkout's input-admission and LLM contracts when declared.
 set -euo pipefail
+
+workflow=.github/workflows/release-1.6.1-contracts.yml
+if [[ ! -f "$workflow" ]]; then
+  workflow=.github/workflows/contracts.yml
+fi
+if [[ -f "$workflow" ]]; then
+  exec /usr/bin/python3 -I - "$workflow" "$@" <<'PYTHON'
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import yaml
+
+workflow, mode, *args = sys.argv[1:]
+if mode == "report":
+    sys.exit(0)
+
+upstream = yaml.safe_load(Path(workflow).read_text())["jobs"]
+cpu, rust = upstream["cpu-contracts"], upstream["rust-contracts"]
+cpu_steps = {step.get("name"): step for step in cpu["steps"]}
+rust_steps = {step.get("name"): step for step in rust["steps"]}
+cpu_install = (
+    "Install CPU test dependencies",
+    "Install input admission CPU dependencies",
+)
+cpu_test = "Test input admission against the installed extension"
+rust_setup = (
+    "Prepare pinned Harmony vocabularies before parallel tests",
+    "Install JUnit policy dependencies",
+    "Install native build prerequisites and local NATS",
+    "Install components for the repository Rust toolchain",
+    "Prepare verified Harmony vocabulary",
+)
+rust_labels = ("llm-unit", "llm-http-batch", "llm-http-nvext")
+rust_commands = {}
+for step in rust["steps"]:
+    lines = step.get("run", "").replace("\\\n", " ").splitlines()
+    gates = [line for line in lines if ".github/ci/run_rust_gate.py" in line]
+    if not gates:
+        continue
+    preamble = lines[:lines.index(gates[0])]
+    for gate in gates:
+        match = re.search(r"--label (\S+)", gate)
+        if match and match[1] in rust_labels:
+            rust_commands[match[1]] = (step, "\n".join([*preamble, gate]))
+
+for label in rust_labels[:2]:
+    if label not in rust_commands:
+        sys.exit(f"{workflow} does not register the required Rust contract {label}")
+
+if mode == "plan" and not args:
+    python = next(step["with"]["python-version"] for step in cpu["steps"]
+                  if step.get("uses", "").startswith("actions/setup-python@"))
+    nextest = rust_steps["Install pinned nextest and gate dependencies"]["with"]["tool"]
+    jobs = [{"id": "cpu-contracts", "timeout": cpu["timeout-minutes"], "python": python}]
+    jobs.extend({"id": label, "timeout": rust["timeout-minutes"], "nextest": nextest}
+                for label in rust_labels if label in rust_commands)
+    print(json.dumps({"version": 1, "report": False, "jobs": jobs}))
+    sys.exit(0)
+if mode not in {"setup", "run"} or len(args) != 1:
+    sys.exit(f"invalid Dynamo entry invocation: {sys.argv[2:]}")
+
+env = dict(os.environ, GITHUB_WORKSPACE=str(Path.cwd()))
+
+
+def run_step(step, command=None):
+    step_env = env.copy()
+    for key, value in step.get("env", {}).items():
+        if value == "${{ secrets.GIE_GIT_TOKEN }}":
+            if not step_env.get(key):
+                sys.exit(f"{key} is required by {step['name']}")
+            continue
+        value = str(value).replace("${{ runner.temp }}", env.get("RUNNER_TEMP", ""))
+        if "${{" in value:
+            sys.exit(f"unsupported GitHub expression for {key} in {step['name']}")
+        step_env[key] = value
+    command = step["run"] if command is None else command
+    if "${{" in command:
+        sys.exit(f"unsupported GitHub expression in {step['name']}")
+    print(f"{workflow}: {step['name']} ({args[0]})", flush=True)
+    result = subprocess.run(["bash", "-eo", "pipefail", "-c", command], env=step_env)
+    if result.returncode:
+        sys.exit(result.returncode)
+
+
+job = args[0]
+if job == "cpu-contracts":
+    for name in cpu_install if mode == "setup" else (cpu_test,):
+        run_step(cpu_steps[name])
+elif job in rust_commands:
+    env.update({key: str(value) for key, value in rust.get("env", {}).items()})
+    if mode == "setup":
+        for name in rust_setup:
+            run_step(rust_steps[name])
+    else:
+        run_step(*rust_commands[job])
+else:
+    sys.exit(f"unknown Dynamo contract {job}")
+PYTHON
+fi
+
+# Preserve the existing KVBM entry for the release 1.4 workflow.
+if [[ ! -f .github/workflows/pre-merge-release-1.4.0.yml && ! -f .github/workflows/kvbm-shared-pool-lifecycle.yml ]]; then
+  printf '该提交无桥接对象：%s（缺少 Dynamo contracts workflow）\n' "${CI_REF_SHA:-$(git rev-parse --short HEAD 2>/dev/null || printf unknown)}" >&2
+  exit 1
+fi
 
 case "$1" in
   plan)

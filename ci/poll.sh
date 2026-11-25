@@ -3,16 +3,14 @@
 # Queue unit CI for every open non-fork PR head plus the head of every
 # protected branch (GitHub branch protection list; no branch names are
 # hard-coded here). With target branches specified, poll only their PRs and heads.
-# POLL_DRY_RUN=1 prints the selected work without checking or writing statuses.
 # Run-once-per-SHA: a SHA that already has any status for
 # <context> is skipped. Each dispatch carries a concurrency group (pr-<n> /
 # branch-<name>), so a newer head cancels the superseded run.
 set -euo pipefail
 REPO="$1" CTX="$2" EVENT="$3" ONLY="${4:-}" TARGET_BRANCHES="${5:-}"
-DRY_RUN="${POLL_DRY_RUN:-0}"
 TOKEN="$(printf %s "$GIE_GIT_TOKEN" | tr -d '[:space:]')"
 [ -n "$TOKEN" ] || { echo '::error::GIE_GIT_TOKEN empty'; exit 1; }
-[ "$DRY_RUN" = 1 ] || echo "::add-mask::$TOKEN"
+echo "::add-mask::$TOKEN"
 API="https://api.github.com"
 H1="Authorization: token ${TOKEN}"
 H2="Accept: application/vnd.github+json"
@@ -26,7 +24,7 @@ allowed_prs() {
       ($csv | split(",")) as $branches
       | .[]
       | select(.head.repo.full_name == $r and (.base.ref as $base | $branches | index($base)) != null)
-      | "\(.head.sha) pr-\(.number) \(.base.ref)"' <<< "$body" || return
+      | "\(.head.sha) pr-\(.number)"' <<< "$body" || return
     size=$(jq 'length' <<< "$body") || return
     if [ "$size" -lt 100 ]; then
       return
@@ -42,11 +40,11 @@ allowed_heads() {
   for name in "${names[@]}"; do
     endpoint=$(jq -rn --arg name "$name" '$name | @uri') || return
     body=$(get "repos/$REPO/branches/$endpoint") || return
-    jq -er '"\(.commit.sha) branch-\(.name | gsub("[^A-Za-z0-9._-]"; "_")) \(.name)"' <<< "$body" || return
+    jq -er '"\(.commit.sha) branch-\(.name | gsub("[^A-Za-z0-9._-]"; "_"))"' <<< "$body" || return
   done
 }
 
-# lines: "<sha> <group> [target branch]"
+# lines: "<sha> <group>"
 if [ -n "$TARGET_BRANCHES" ]; then
   prs=$(allowed_prs)
   branches=$(allowed_heads)
@@ -72,13 +70,8 @@ else
   work=$(printf '%s\n%s\n' "$prs" "$branches" | awk 'NF' | sort -u -k1,1)
 fi
 
-if [ "$DRY_RUN" = 1 ]; then
-  awk 'NF { print "selected " $0; count++ } END { print "selected=" count+0 }' <<< "$work"
-  exit 0
-fi
-
 dispatched=0
-while read -r ref group _; do
+while read -r ref group; do
   [ -n "$ref" ] || continue
   if ! body=$(get "repos/$REPO/commits/$ref/status"); then
     echo "skip $ref (status fetch failed)"; continue

@@ -20,7 +20,7 @@ def pull(number, base, repo=REPO):
 
 
 class PollTests(unittest.TestCase):
-    def run_poll(self, responses, *, target_branches=None, only="", dry_run=False):
+    def run_poll(self, responses, *, target_branches=None, only=""):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             fixture = root / "responses.json"
@@ -51,7 +51,6 @@ if method == "GET":
                 os.environ,
                 PATH=f"{root}:{os.environ['PATH']}",
                 GIE_GIT_TOKEN="test-token",
-                POLL_DRY_RUN="1" if dry_run else "0",
                 MOCK_RESPONSES=str(fixture),
                 MOCK_REQUESTS=str(requests),
             )
@@ -90,20 +89,6 @@ if method == "GET":
             "p001": "pr-1",
             "p003": "pr-3",
         }
-        dry, requests = self.run_poll(responses, target_branches=TARGETS, dry_run=True)
-        self.assertEqual(dry.returncode, 0, dry.stderr)
-        self.assertEqual(
-            dry.stdout.splitlines(),
-            [
-                "selected ba branch-release_a release/a",
-                "selected bb branch-release_b release/b",
-                "selected p001 pr-1 release/a",
-                "selected p003 pr-3 release/b",
-                "selected=4",
-            ],
-        )
-        self.assertTrue(all(method == "GET" for method, _, _ in requests))
-
         responses[f"repos/{REPO}/commits/main"] = {"sha": "p002"}
         rejected, _ = self.run_poll(responses, target_branches=TARGETS, only="main")
         self.assertNotEqual(rejected.returncode, 0)
@@ -128,13 +113,17 @@ if method == "GET":
             f"repos/{REPO}/branches?protected=true&per_page=100": [
                 {"name": "protected/legacy", "commit": {"sha": "legacy"}},
             ],
-        }, dry_run=True)
+            f"repos/{REPO}/commits/legacy/status": {"statuses": []},
+            f"repos/{REPO}/commits/p001/status": {"statuses": []},
+            f"repos/{REPO}/commits/p002/status": {"statuses": []},
+        })
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
-            result.stdout.splitlines(),
-            ["selected legacy branch-protected_legacy", "selected p001 pr-1", "selected p002 pr-2", "selected=3"],
+            [body["client_payload"]["ref"] for method, endpoint, body in requests
+             if method == "POST" and endpoint.endswith("/dispatches")],
+            ["legacy", "p001", "p002"],
         )
-        self.assertEqual(len(requests), 2)
+        self.assertIn("dispatched=3", result.stdout)
 
     def test_dispatch_without_whitelist_keeps_legacy_payload(self):
         result, requests = self.run_poll({
@@ -162,9 +151,12 @@ if method == "GET":
             f"repos/{REPO}/pulls?state=open&per_page=100&page=1": [pull(n, "main") for n in range(100)],
             f"repos/{REPO}/pulls?state=open&per_page=100&page=2": [pull(100, "release/a")],
             f"repos/{REPO}/branches/release%2Fa": {"name": "release/a", "commit": {"sha": "ba"}},
-        }, target_branches="release/a", dry_run=True)
+            f"repos/{REPO}/commits/ba/status": {"statuses": []},
+            f"repos/{REPO}/commits/p100/status": {"statuses": []},
+        }, target_branches="release/a")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("selected p100 pr-100 release/a", result.stdout)
+        self.assertIn("queue p100 pr-100", result.stdout)
+        self.assertIn("dispatched=2", result.stdout)
 
 
 if __name__ == "__main__":

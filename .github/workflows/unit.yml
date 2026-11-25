@@ -30,9 +30,6 @@ on:
       ref:
         type: string
         required: true
-      base_ref:
-        type: string
-        default: ''
       test_setup:
         type: string
         default: legacy
@@ -88,7 +85,6 @@ jobs:
           DEFAULT_ENTRY: ${{ inputs.default_entry }}
           SRC: src
           CIW: ciw
-          CI_BASE_REF: ${{ inputs.base_ref }}
           TEST_UNIT_SETUP: ${{ inputs.test_setup }}
         run: /usr/bin/python3 -I ciw/ci/plan.py
 
@@ -194,7 +190,6 @@ jobs:
       TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
       CI_ENTRY_KIND: ${{ needs.prepare.outputs.kind }}
       CI_JOB: ${{ matrix.id }}
-      CI_BASE_REF: ${{ inputs.base_ref }}
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
       CI_SHARED: ${{ github.workspace }}/.ci-shared
@@ -289,6 +284,10 @@ jobs:
           prefix-key: v1-${{ inputs.repo }}
           shared-key: ${{ matrix.id }}
           cache-on-failure: true
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/dynamo' && needs.prepare.outputs.kind == 'legacy' && matrix.nextest != ''
+        with:
+          tool: ${{ matrix.nextest }}
       - name: Restore verified Nix cache
         if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id != 'fresh-container-lifecycle' && matrix.id != 'fresh-nix-daemon'
         uses: ./ciw/.github/actions/nix-cache-restore
@@ -304,6 +303,8 @@ jobs:
       - name: setup ${{ matrix.id }}
         if: steps.verified.outputs.skip != 'true'
         working-directory: src
+        env:
+          GIE_GIT_TOKEN: ${{ inputs.repo == 'goodputai/dynamo' && needs.prepare.outputs.kind == 'legacy' && matrix.id == 'cpu-contracts' && secrets.GIE_GIT_TOKEN || '' }}
         run: |
           if [[ "$CI_JOB" == static && "${{ inputs.repo }}" == goodputai/test && "$TEST_UNIT_SETUP" == nix && "${{ inputs.test_nix_cache }}" == true ]]; then
             TEST_UNIT_SETUP=nix bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" setup "$CI_JOB"

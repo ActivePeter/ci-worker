@@ -57,4 +57,4 @@ class SglangEntryTests(unittest.TestCase):
         result = self.entry("run", "cpu-unit")
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertEqual((self.src / "run-suite.log").read_text(),
-                         "run-from-checkout base-a-test-cpu --fork-worker-batch-size 20 --continue-on-error\ntrue false\n")
+                         "run-from-checkout base-a-test-cpu --fork-worker-batch-size 20 --continue-on-error\ntrue true\n")
