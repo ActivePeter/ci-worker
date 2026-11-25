@@ -11,10 +11,6 @@ on:
       ref:
         description: "branch / tag / full SHA to run unit CI on"
         required: true
-      base_ref:
-        description: "optional target branch for selecting the SGLang CPU test profile"
-        type: string
-        required: false
   repository_dispatch:
     types: [run-sglang-unit]
 
@@ -33,6 +29,5 @@ jobs:
       context: ci/public-worker/sglang-unit
       default_entry: ci/defaults/sglang.sh
       ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
-      base_ref: ${{ github.event.client_payload.base_ref || inputs.base_ref }}
     secrets:
       GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}

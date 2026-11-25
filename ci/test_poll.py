@@ -117,10 +117,7 @@ if method == "GET":
             if method == "POST" and endpoint.endswith("/dispatches")
         ]
         self.assertEqual({payload["ref"]: payload["group"] for payload in dispatches}, expected)
-        self.assertEqual(
-            {payload["ref"]: payload["base_ref"] for payload in dispatches},
-            {"ba": "release/a", "bb": "release/b", "p001": "release/a", "p003": "release/b"},
-        )
+        self.assertTrue(all(set(payload) == {"ref", "group", "source"} for payload in dispatches))
         self.assertIn("dispatched=4", result.stdout)
 
     def test_without_whitelist_keeps_legacy_pr_and_protected_branch_selection(self):

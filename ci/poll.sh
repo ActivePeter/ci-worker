@@ -78,7 +78,7 @@ if [ "$DRY_RUN" = 1 ]; then
 fi
 
 dispatched=0
-while read -r ref group target_branch; do
+while read -r ref group _; do
   [ -n "$ref" ] || continue
   if ! body=$(get "repos/$REPO/commits/$ref/status"); then
     echo "skip $ref (status fetch failed)"; continue
@@ -88,9 +88,6 @@ while read -r ref group target_branch; do
   if [ -n "$state" ]; then echo "skip $ref $group (latest=$state)"; continue; fi
   echo "queue $ref $group"
   dispatch_payload="{\"event_type\":\"$EVENT\",\"client_payload\":{\"ref\":\"$ref\",\"group\":\"$group\",\"source\":\"poll\"}}"
-  if [ -n "$target_branch" ]; then
-    dispatch_payload=$(jq -c --arg base_ref "$target_branch" '.client_payload.base_ref = $base_ref' <<< "$dispatch_payload")
-  fi
   curl -fsS -X POST -H "$H1" -H "$H2" "$API/repos/$REPO/statuses/$ref" \
     -d "{\"state\":\"pending\",\"context\":\"$CTX\",\"description\":\"queued by poll\"}" >/dev/null \
     || { echo "warn: pending-mark failed for $ref"; continue; }

@@ -32,7 +32,7 @@ on:
         required: true
       base_ref:
         type: string
-        default: ""
+        default: ''
       test_setup:
         type: string
         default: legacy
@@ -88,6 +88,7 @@ jobs:
           DEFAULT_ENTRY: ${{ inputs.default_entry }}
           SRC: src
           CIW: ciw
+          CI_BASE_REF: ${{ inputs.base_ref }}
           TEST_UNIT_SETUP: ${{ inputs.test_setup }}
         run: /usr/bin/python3 -I ciw/ci/plan.py
 
@@ -193,6 +194,7 @@ jobs:
       TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
       CI_ENTRY_KIND: ${{ needs.prepare.outputs.kind }}
       CI_JOB: ${{ matrix.id }}
+      CI_BASE_REF: ${{ inputs.base_ref }}
       CI_OUT: ${{ github.workspace }}/.ci-out
       CI_REF_SHA: ${{ needs.prepare.outputs.sha }}
       CI_SHARED: ${{ github.workspace }}/.ci-shared
@@ -311,8 +313,6 @@ jobs:
       - name: run ${{ matrix.id }}
         if: steps.verified.outputs.skip != 'true'
         working-directory: src
-        env:
-          SGLANG_CI_BASE_REF: ${{ inputs.base_ref }}
         run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
       - name: Save Nix cache (main static job only)
         if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id == 'static' && github.ref == 'refs/heads/main'
