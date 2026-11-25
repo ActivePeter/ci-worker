@@ -206,7 +206,7 @@ class Workflow:
                 action = step["uses"].split("@", 1)[0]
                 if action not in self.actions:
                     raise ValueError(f"unsupported workflow action for {self.engine}: {action}")
-                unsupported = set(step.get("with", {})) - self.actions[action]
+                unsupported = set(step.get("with") or {}) - self.actions[action]
                 if unsupported:
                     raise ValueError(f"unsupported workflow action inputs for {action}: {', '.join(sorted(unsupported))}")
                 if active and action == "actions/setup-python":
@@ -366,5 +366,5 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (KeyError, ValueError) as error:
+    except (KeyError, ValueError, subprocess.CalledProcessError) as error:
         sys.exit(str(error))

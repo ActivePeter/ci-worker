@@ -139,6 +139,12 @@ elif endpoint.endswith("/dispatches") and os.environ["MOCK_FAIL_DISPATCH"] == "1
         failed, requests = self.run_poll(responses, target_branches="release/a", fail_dispatch=True)
         self.assertEqual(failed.returncode, 0, failed.stderr)
         self.assertIn("dispatch failed for ba", failed.stdout)
+        self.assertIn("skip p001", failed.stdout)
+        self.assertFalse(any(method == "POST" and endpoint.endswith("/statuses/p001")
+                             for method, endpoint, _ in requests))
+        self.assertFalse(any(method == "POST" and endpoint.endswith("/dispatches")
+                             and body["client_payload"]["ref"] == "p001"
+                             for method, endpoint, body in requests))
         statuses = [body for method, endpoint, body in requests
                     if method == "POST" and endpoint.endswith("/statuses/ba")]
         self.assertEqual([status["state"] for status in statuses], ["pending", "failure"])
