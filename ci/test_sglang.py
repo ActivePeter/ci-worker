@@ -1,4 +1,4 @@
-"""The CPU bridge reads setup and test commands from the target stage."""
+"""Exercise the source SGLang stage through the shared workflow parser."""
 import json
 import os
 import subprocess
@@ -8,7 +8,7 @@ from pathlib import Path
 
 import plan
 
-ENTRY = Path(__file__).resolve().parent / "defaults" / "sglang.sh"
+ENTRY = Path(__file__).resolve().parent / "defaults/sglang.sh"
 
 
 class SglangEntryTests(unittest.TestCase):
@@ -16,26 +16,31 @@ class SglangEntryTests(unittest.TestCase):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
         self.src = Path(scratch.name)
-        workflow = self.src / ".github/workflows/_pr-test-stage-cpu.yml"
-        workflow.parent.mkdir(parents=True)
+        self.workflow = self.src / ".github/workflows/_pr-test-stage-cpu.yml"
+        self.workflow.parent.mkdir(parents=True)
         (self.src / "test").mkdir()
-        workflow.write_text(json.dumps({"env": {"SGLANG_IS_IN_CI": True, "USE_VENV": False}, "jobs": {"run": {
-            "timeout-minutes": 240,
-            "steps": [
-                {"name": "Python from source", "uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}},
-                {"name": "Install protoc + Rust toolchain", "run": "echo rust-from-checkout # install_rust_protoc.sh"},
-                {"name": "Install dependencies", "env": {"UV_SYSTEM_PYTHON": "1"},
-                 "run": 'echo "install-from-checkout UV_SYSTEM_PYTHON=$UV_SYSTEM_PYTHON" # uv pip install'},
-                {"name": "Run test", "env": {"SGLANG_SKIP_RUST_TESTS": "${{ fixture }}"},
-                 "run": 'cd test/\n# run_suite.py\n'
-                        'echo "run-from-checkout ${{ inputs.self_name }} --auto-partition-id ${{ matrix.partition }}'
-                        ' --auto-partition-size ${{ fromJson(inputs.partitions)[inputs.self_name].size }}'
-                        ' --partition-model-file /tmp/model.json --fork-worker-batch-size 20 $CONTINUE_ON_ERROR_FLAG"\n'
-                        'echo "$SGLANG_IS_IN_CI $SGLANG_SKIP_RUST_TESTS"\nexit 7'},
-            ],
-        }}}))
+        self.data = {
+            "env": {"SGLANG_IS_IN_CI": True, "ADDED_WORKFLOW_FLAG": "workflow"},
+            "jobs": {"run": {
+                "timeout-minutes": 240,
+                "env": {"ADDED_JOB_FLAG": "job"},
+                "steps": [
+                    {"uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}},
+                    {"run": "echo rust-from-checkout"},
+                    {"run": 'echo "install-from-checkout $ADDED_WORKFLOW_FLAG $ADDED_JOB_FLAG $UV_SYSTEM_PYTHON"',
+                     "env": {"UV_SYSTEM_PYTHON": "1"}},
+                    {"env": {"SGLANG_SKIP_RUST_TESTS": "${{ fromJson(inputs.check_changes).rust_workspace == 'true' && 'false' || 'true' }}"},
+                     "run": 'cd test/\n# run_suite.py\n'
+                            'echo "run-from-checkout ${{ inputs.self_name }} --auto-partition-id ${{ matrix.partition }}'
+                            ' --auto-partition-size ${{ fromJson(inputs.partitions)[inputs.self_name].size }}'
+                            ' --partition-model-file /tmp/partition-model.json --fork-worker-batch-size 20"\n'
+                            'echo "$SGLANG_IS_IN_CI $SGLANG_SKIP_RUST_TESTS"\nexit 7'},
+                ],
+            }},
+        }
 
     def entry(self, *args):
+        self.workflow.write_text(json.dumps(self.data))
         return subprocess.run(
             ["bash", str(ENTRY), *args], cwd=self.src, text=True,
             capture_output=True, env=dict(os.environ, CI_OUT=str(self.src)),
@@ -48,13 +53,21 @@ class SglangEntryTests(unittest.TestCase):
         self.assertEqual([(job["id"], job["python"]) for job in jobs], [("cpu-unit", "3.11")])
         self.assertFalse(report)
 
-    def test_setup_uses_checkout_install_steps(self):
-        result = self.entry("setup", "cpu-unit")
-        result.check_returncode()
-        self.assertEqual(result.stdout, "rust-from-checkout\ninstall-from-checkout UV_SYSTEM_PYTHON=1\n")
-
-    def test_run_keeps_checkout_options_and_fails_with_the_suite(self):
+    def test_run_uses_checkout_steps_and_propagates_suite_failure(self):
         result = self.entry("run", "cpu-unit")
         self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn("install-from-checkout workflow job 1", result.stdout)
         self.assertEqual((self.src / "run-suite.log").read_text(),
-                         "run-from-checkout base-a-test-cpu --fork-worker-batch-size 20 --continue-on-error\ntrue true\n")
+                         "run-from-checkout base-a-test-cpu --fork-worker-batch-size 20\ntrue true\n")
+
+    def test_step_environment_rejects_unknown_expression(self):
+        self.data["jobs"]["run"]["steps"][1]["env"] = {"OTHER": "${{ unknown.context }}"}
+        result = self.entry("plan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported workflow expression: unknown.context", result.stderr)
+
+    def test_missing_suite_fails_plan(self):
+        self.data["jobs"]["run"]["steps"].pop()
+        result = self.entry("plan")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no supported test entry", result.stderr)

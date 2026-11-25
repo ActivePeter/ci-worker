@@ -285,7 +285,7 @@ jobs:
           shared-key: ${{ matrix.id }}
           cache-on-failure: true
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
-        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/dynamo' && needs.prepare.outputs.kind == 'legacy' && matrix.nextest != ''
+        if: steps.verified.outputs.skip != 'true' && matrix.nextest != ''
         with:
           tool: ${{ matrix.nextest }}
       - name: Restore verified Nix cache
@@ -313,7 +313,7 @@ jobs:
         if: steps.verified.outputs.skip != 'true'
         working-directory: src
         env:
-          GIE_GIT_TOKEN: ${{ inputs.repo == 'goodputai/dynamo' && needs.prepare.outputs.kind == 'legacy' && matrix.id == 'cpu-contracts' && secrets.GIE_GIT_TOKEN || '' }}
+          GIE_GIT_TOKEN: ${{ matrix.git_token && secrets.GIE_GIT_TOKEN || '' }}
         run: bash "$GITHUB_WORKSPACE/ciw/ci/entry.sh" run "$CI_JOB"
       - name: Save Nix cache (main static job only)
         if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id == 'static' && github.ref == 'refs/heads/main'

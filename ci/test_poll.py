@@ -43,7 +43,14 @@ with Path(os.environ["MOCK_REQUESTS"]).open("a") as log:
     log.write(json.dumps([method, endpoint, body]) + "\\n")
 if method == "GET":
     responses = json.loads(Path(os.environ["MOCK_RESPONSES"]).read_text())
-    print(json.dumps(responses[endpoint]))
+    response = responses[endpoint]
+    status = 200
+    if isinstance(response, dict) and "_fixture_status" in response:
+        status = response["_fixture_status"]
+        response = {}
+    print(json.dumps(response))
+    if "-w" in args:
+        print(status)
 """
             )
             curl.chmod(0o755)
@@ -104,6 +111,18 @@ if method == "GET":
         self.assertEqual({payload["ref"]: payload["group"] for payload in dispatches}, expected)
         self.assertTrue(all(set(payload) == {"ref", "group", "source"} for payload in dispatches))
         self.assertIn("dispatched=4", result.stdout)
+
+    def test_missing_target_branch_does_not_block_other_target(self):
+        result, requests = self.run_poll({
+            f"repos/{REPO}/pulls?state=open&per_page=100&page=1": [],
+            f"repos/{REPO}/branches/release%2Fa": {"_fixture_status": 404},
+            f"repos/{REPO}/branches/release%2Fb": {"name": "release/b", "commit": {"sha": "bb"}},
+            f"repos/{REPO}/commits/bb/status": {"statuses": []},
+        }, target_branches=TARGETS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("warning::target branch release/a was not found", result.stderr)
+        self.assertEqual([body["client_payload"]["ref"] for method, endpoint, body in requests
+                          if method == "POST" and endpoint.endswith("/dispatches")], ["bb"])
 
     def test_without_whitelist_keeps_legacy_pr_and_protected_branch_selection(self):
         result, requests = self.run_poll({

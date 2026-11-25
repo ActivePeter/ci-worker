@@ -34,12 +34,19 @@ allowed_prs() {
 }
 
 allowed_heads() {
-  local name endpoint body
+  local name endpoint response status body
   local -a names
   IFS=, read -r -a names <<< "$TARGET_BRANCHES"
   for name in "${names[@]}"; do
     endpoint=$(jq -rn --arg name "$name" '$name | @uri') || return
-    body=$(get "repos/$REPO/branches/$endpoint") || return
+    response=$(curl -sS -w $'\n%{http_code}' -H "$H1" -H "$H2" "$API/repos/$REPO/branches/$endpoint") || return
+    status=${response##*$'\n'}
+    body=${response%$'\n'*}
+    case "$status" in
+      200) ;;
+      404) echo "::warning::target branch $name was not found" >&2; continue ;;
+      *) echo "::error::branch $name lookup returned HTTP $status" >&2; return 1 ;;
+    esac
     jq -er '"\(.commit.sha) branch-\(.name | gsub("[^A-Za-z0-9._-]"; "_"))"' <<< "$body" || return
   done
 }

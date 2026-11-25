@@ -42,6 +42,7 @@ def normalize(plan):
             "id": ident,
             "timeout": max(1, min(int(job.get("timeout", 20)), 90 if nextest else 60)),
             "nextest": nextest,
+            "git_token": bool(job.get("git_token", False)),
             "python": str(job.get("python", "")),
             "shared": bool(job.get("shared", False)),
             "verification": verification,
