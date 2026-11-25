@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -45,12 +46,14 @@ SGLANG_CONDITIONS = {
     "fromJson(inputs.check_changes).partition_model_sha != ''": False,
     "steps.hf_cache_save.outputs.save == 'true'": False,
 }
+SGLANG_CONTINUE_FLAG = (
+    "fromJson(inputs.check_changes).continue_on_error == 'true' && '--continue-on-error' || ''"
+)
 SGLANG_EXPRESSIONS = {
     "(fromJson(inputs.caller_inputs).skip_pr_test_health_check || fromJson(inputs.caller_inputs).test_parallel_dispatch || fromJson(inputs.caller_inputs).run_all_tests) && 'true' || 'false'": "false",
     "github.ref == 'refs/heads/main' && 'true' || 'false'": "false",
     "steps.rust_ext.outcome == 'success' && 'none' || ''": "",
     "fromJson(inputs.check_changes).rust_workspace == 'true' && 'false' || 'true'": "true",
-    "fromJson(inputs.check_changes).continue_on_error == 'true' && '--continue-on-error' || ''": "--continue-on-error",
     "fromJson(inputs.check_changes).partition_model_sha": "",
     "steps.hf_cache_before.outputs.bytes": "0",
     "inputs.self_name": "base-a-test-cpu",
@@ -246,6 +249,36 @@ class Workflow:
         sys.exit(failed)
 
 
+def sglang_pr_continue_on_error(workflow):
+    source = Path(".github/workflows/_pr-test-check-changes.yml")
+    steps = yaml.safe_load(source.read_text())["jobs"]["run"]["steps"]
+    commands = {step["id"]: step["run"] for step in steps if "id" in step and "run" in step}
+    workflow.expressions.update({
+        "github.event_name": "pull_request",
+        "github.event_name == 'schedule'": "false",
+        "inputs.run_all_tests": "false",
+        "inputs.force_continue_on_error": "false",
+    })
+    with tempfile.TemporaryDirectory(prefix="ci22-sglang-check-") as directory:
+        output = Path(directory) / "output"
+
+        def run(step, field):
+            output.write_text("")
+            subprocess.run(
+                ["bash", "-e", "-c", workflow.expand(commands[step])],
+                env=dict(workflow.environment, GITHUB_OUTPUT=str(output)),
+                check=True, stdout=subprocess.DEVNULL,
+            )
+            value = dict(environment_updates(output.read_text().splitlines())).get(field)
+            if value not in {"true", "false"}:
+                raise ValueError(f"SGLang check-changes did not emit boolean {field}")
+            return value
+
+        workflow.expressions["steps.run-mode.outputs.run_all_tests"] = run("run-mode", "run_all_tests")
+        value = run("set-continue-on-error", "continue_on_error")
+    return "--continue-on-error" if value == "true" else ""
+
+
 def sglang_partitions(stage):
     caller = Path(".github/workflows/pr-test.yml")
     upstream = yaml.safe_load(caller.read_text())["jobs"]["base-a-test-cpu"]
@@ -288,6 +321,7 @@ def main():
     if engine == "sglang":
         if "run" not in jobs:
             raise ValueError("SGLang CPU stage has no run job")
+        workflow.expressions[SGLANG_CONTINUE_FLAG] = sglang_pr_continue_on_error(workflow)
         suite, size, indices, minutes = sglang_partitions(path)
         selected = {f"cpu-unit-{partition}": "run" for partition in indices}
         entries = {}

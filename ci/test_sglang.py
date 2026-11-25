@@ -23,6 +23,11 @@ class SglangEntryTests(unittest.TestCase):
             "base-a-test-cpu": {"uses": "./.github/workflows/_pr-test-stage-cpu.yml",
                                 "with": {"self_name": "base-a-test-cpu", "run_timeout_minutes": "12"}},
         }}))
+        self.check_changes = self.workflow.parent / "_pr-test-check-changes.yml"
+        self.check_changes.write_text(json.dumps({"jobs": {"run": {"steps": [
+            {"id": "run-mode", "run": 'test "${{ github.event_name }}" = pull_request; echo "run_all_tests=false" >> "$GITHUB_OUTPUT"'},
+            {"id": "set-continue-on-error", "run": 'echo "continue_on_error=${{ steps.run-mode.outputs.run_all_tests }}" >> "$GITHUB_OUTPUT"'},
+        ]}}}))
         calculator = self.src / "scripts/ci/utils/compute_partitions.py"
         calculator.parent.mkdir(parents=True)
         calculator.write_text(
@@ -38,16 +43,19 @@ class SglangEntryTests(unittest.TestCase):
                 "env": {"ADDED_JOB_FLAG": "job"},
                 "steps": [
                     {"uses": "actions/setup-python@v5", "with": {"python-version": "3.11"}},
+                    {"uses": "actions/download-artifact@v4", "if": "${{ inputs.rust_ext_artifact != '' }}",
+                     "continue-on-error": True},
                     {"run": "echo rust-from-checkout"},
                     {"run": 'echo "install-from-checkout $ADDED_WORKFLOW_FLAG $ADDED_JOB_FLAG $UV_SYSTEM_PYTHON"',
                      "env": {"UV_SYSTEM_PYTHON": "1"}},
                     {"timeout-minutes": "${{ fromJson(inputs.run_timeout_minutes) }}",
-                     "env": {"SGLANG_SKIP_RUST_TESTS": "${{ fromJson(inputs.check_changes).rust_workspace == 'true' && 'false' || 'true' }}"},
+                     "env": {"CONTINUE_ON_ERROR_FLAG": "${{ fromJson(inputs.check_changes).continue_on_error == 'true' && '--continue-on-error' || '' }}",
+                             "SGLANG_SKIP_RUST_TESTS": "${{ fromJson(inputs.check_changes).rust_workspace == 'true' && 'false' || 'true' }}"},
                      "run": 'cd test/\n# run_suite.py\n'
                             'echo "run-from-checkout ${{ inputs.self_name }} --auto-partition-id ${{ matrix.partition }}'
                             ' --auto-partition-size ${{ fromJson(inputs.partitions)[inputs.self_name].size }}'
                             ' --partition-model-file /tmp/partition-model.json --fork-worker-batch-size 20"\n'
-                            'echo "$SGLANG_IS_IN_CI $SGLANG_SKIP_RUST_TESTS"\nexit 7'},
+                            'echo "$SGLANG_IS_IN_CI $SGLANG_SKIP_RUST_TESTS flag=[$CONTINUE_ON_ERROR_FLAG]"\nexit 7'},
                 ],
             }},
         }
@@ -71,7 +79,14 @@ class SglangEntryTests(unittest.TestCase):
         self.assertEqual(result.returncode, 7, result.stderr)
         self.assertIn("install-from-checkout workflow job 1", result.stdout)
         self.assertEqual((self.src / "run-suite.log").read_text(),
-                         "run-from-checkout base-a-test-cpu --auto-partition-id 1 --auto-partition-size 3 --partition-model-file /tmp/partition-model.json --fork-worker-batch-size 20\ntrue true\n")
+                         "run-from-checkout base-a-test-cpu --auto-partition-id 1 --auto-partition-size 3 --partition-model-file /tmp/partition-model.json --fork-worker-batch-size 20\ntrue true flag=[]\n")
+
+    def test_source_can_enable_continue_on_error(self):
+        source = self.check_changes.read_text().replace("run_all_tests=false", "run_all_tests=true")
+        self.check_changes.write_text(source)
+        result = self.entry("run", "cpu-unit-1")
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn("flag=[--continue-on-error]", (self.src / "run-suite.log").read_text())
 
     def test_step_environment_rejects_unknown_expression(self):
         self.data["jobs"]["run"]["steps"][1]["env"] = {"OTHER": "${{ unknown.context }}"}
