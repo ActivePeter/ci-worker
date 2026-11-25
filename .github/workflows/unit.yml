@@ -42,19 +42,30 @@ on:
       verify_always:
         type: boolean
         default: false
+      affected_base:
+        type: string
+        default: ""
+      request_source:
+        type: string
+        default: ""
+      request_group:
+        type: string
+        default: ""
     secrets:
       GIE_GIT_TOKEN:
         required: true
 
-permissions:
-  contents: read
-
+# Inherit the caller token. Only run-test-unit grants Actions read access
+# for exact-fingerprint artifact lookups.
 jobs:
   prepare:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
+      affected: ${{ steps.plan.outputs.affected }}
+      full_run: ${{ steps.plan.outputs.full_run }}
+      affected_base: ${{ steps.plan.outputs.affected_base }}
       kind: ${{ steps.plan.outputs.kind }}
       jobs: ${{ steps.plan.outputs.jobs }}
       shared: ${{ steps.plan.outputs.shared }}
@@ -70,6 +81,7 @@ jobs:
           repository: ${{ inputs.repo }}
           ref: ${{ inputs.ref }}
           token: ${{ secrets.GIE_GIT_TOKEN }}
+          fetch-depth: ${{ fromJSON(inputs.affected_base != '' && '0' || '1') }}
           path: src
           persist-credentials: false
       - name: Configure goodputai git access
@@ -86,7 +98,21 @@ jobs:
           SRC: src
           CIW: ciw
           TEST_UNIT_SETUP: ${{ inputs.test_setup }}
+          CI_AFFECTED_BASE: ${{ inputs.affected_base }}
+          CI_REQUEST_SOURCE: ${{ inputs.request_source }}
+          CI_REQUEST_GROUP: ${{ inputs.request_group }}
+          CI_REQUEST_REF: ${{ inputs.ref }}
+          CI_PLAN_DIRECTORY: ${{ github.workspace }}/.ci-plan
+          CI_ARTIFACT_TOKEN: ${{ github.token }}
+          CI_VERIFY_ALWAYS: ${{ inputs.verify_always || inputs.test_poison_host }}
         run: /usr/bin/python3 -I ciw/ci/plan.py
+      - uses: actions/upload-artifact@v4
+        if: steps.plan.outputs.affected == 'true'
+        with:
+          name: plan-selection
+          path: .ci-plan/selection.json
+          if-no-files-found: error
+          retention-days: 7
 
 
   shared:
@@ -200,7 +226,7 @@ jobs:
           persist-credentials: false
       - name: Verification marker key
         id: verification
-        if: matrix.verification && !inputs.verify_always && !inputs.test_poison_host
+        if: needs.prepare.outputs.affected != 'true' && needs.prepare.outputs.full_run != 'true' && matrix.verification && !inputs.verify_always && !inputs.test_poison_host
         env:
           VERIFICATION_FINGERPRINT: ${{ needs.shared.outputs.verification_fingerprint }}
           VERIFICATION_PLAN: ${{ toJSON(matrix.verification) }}
@@ -285,10 +311,10 @@ jobs:
           shared-key: ${{ matrix.id }}
           cache-on-failure: true
       - name: Restore verified Nix cache
-        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.id != 'fresh-container-lifecycle' && matrix.id != 'fresh-nix-daemon'
+        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && !matrix.clean_nix_daemon
         uses: ./ciw/.github/actions/nix-cache-restore
       - name: Record cache exclusion for daemon lifecycle
-        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && (matrix.id == 'fresh-container-lifecycle' || matrix.id == 'fresh-nix-daemon')
+        if: steps.verified.outputs.skip != 'true' && inputs.repo == 'goodputai/test' && inputs.test_setup == 'nix' && inputs.test_nix_cache && matrix.clean_nix_daemon
         run: echo '{"state":"skipped","reason":"requires a clean multi-user Nix daemon install"}' | tee "$CI_OUT/nix-cache-restore.json"
       - name: Download shared inputs
         if: steps.verified.outputs.skip != 'true' && matrix.shared
@@ -331,6 +357,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       verified_markers: ${{ steps.markers.outputs.markers }}
+      affected: ${{ needs.prepare.outputs.affected }}
     env:
       TEST_UNIT_SETUP: ${{ inputs.test_setup }}
       TEST_UNIT_POISON_HOST: ${{ inputs.test_poison_host && '1' || '0' }}
@@ -349,12 +376,18 @@ jobs:
         with:
           pattern: job-*
           path: ${{ env.CI_IN }}
+      - uses: actions/download-artifact@v4
+        if: needs.prepare.outputs.affected == 'true'
+        with:
+          name: plan-selection
+          path: ${{ env.CI_IN }}/plan-selection
       - uses: actions/checkout@v4
         if: needs.prepare.outputs.report == 'true'
         with:
           repository: ${{ inputs.repo }}
           ref: ${{ needs.prepare.outputs.sha }}
           token: ${{ secrets.GIE_GIT_TOKEN }}
+          fetch-depth: ${{ fromJSON(needs.prepare.outputs.affected_base != '' && '0' || '1') }}
           path: src
           persist-credentials: false
       - name: Restore verified Nix cache for audit
@@ -366,8 +399,12 @@ jobs:
         working-directory: src
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
+          CI_AFFECTED_BASE: ${{ needs.prepare.outputs.affected_base }}
         run: |
           bash "$GITHUB_WORKSPACE/ciw/ci/git-auth.sh"
+          if [ -n "$CI_AFFECTED_BASE" ] && ! git cat-file -e "$CI_AFFECTED_BASE^{commit}"; then
+            git fetch --no-tags origin "$CI_AFFECTED_BASE"
+          fi
           mkdir -p "$CI_OUT"
           if [ '${{ needs.prepare.outputs.kind }}' = target ]; then
             entry="$GITHUB_WORKSPACE/src/.github/ci/public-unit.sh"
@@ -398,10 +435,10 @@ jobs:
         if: steps.markers.outputs.markers != '' && steps.markers.outputs.markers != '[]'
         uses: actions/upload-artifact@v4
         with:
-          name: verification-markers
+          name: ${{ needs.prepare.outputs.affected == 'true' && format('verification-markers-{0}', needs.shared.outputs.verification_fingerprint) || 'verification-markers' }}
           path: ${{ runner.temp }}/ci-verified
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
       - name: Final status (only writer)
         if: always()
         env:
@@ -420,7 +457,7 @@ jobs:
 
   save-verification:
     needs: report
-    if: needs.report.result == 'success' && needs.report.outputs.verified_markers != '' && needs.report.outputs.verified_markers != '[]'
+    if: needs.report.result == 'success' && needs.report.outputs.affected != 'true' && needs.report.outputs.verified_markers != '' && needs.report.outputs.verified_markers != '[]'
     name: save-verification / ${{ matrix.suite }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
