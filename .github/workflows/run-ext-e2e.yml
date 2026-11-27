@@ -30,24 +30,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e:
+  case-config:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      E2E_CASE: ${{ github.event.inputs.case }}
-      E2E_MUTATION: ${{ github.event.inputs.mutation }}
+    outputs:
+      sha: ${{ steps.case.outputs.sha }}
+      timeout: ${{ steps.case.outputs.timeout }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          path: ciw
-          persist-credentials: false
-      - name: Checkout goodputai/goodput-infer-ext at the requested ref
+      - name: Read the requested ext ref
         uses: actions/checkout@v4
         with:
           repository: goodputai/goodput-infer-ext
           ref: ${{ github.event.inputs.ref }}
           token: ${{ secrets.GIE_GIT_TOKEN }}
-          path: src
+          persist-credentials: false
+      - id: case
+        name: Read the timeout used by ext CI
+        env:
+          E2E_CASE: ${{ github.event.inputs.case }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          case_config=$(python3 e2e/harness/ci.py discover --only "$E2E_CASE")
+          timeout=$(jq -er '.include[0].timeout' <<< "$case_config")
+          printf 'sha=%s\ntimeout=%s\n' "$sha" "$timeout" >> "$GITHUB_OUTPUT"
+
+  e2e:
+    needs: case-config
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ fromJSON(needs.case-config.outputs.timeout) }}
+    env:
+      E2E_CASE: ${{ github.event.inputs.case }}
+      E2E_MUTATION: ${{ github.event.inputs.mutation }}
+    steps:
+      # The ext composite action runs its relative-path commands at the workspace root.
+      - name: Checkout the resolved goodputai/goodput-infer-ext commit
+        uses: actions/checkout@v4
+        with:
+          repository: goodputai/goodput-infer-ext
+          ref: ${{ needs.case-config.outputs.sha }}
+          token: ${{ secrets.GIE_GIT_TOKEN }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: ciw
           persist-credentials: false
       - name: Configure goodputai git access
         env:
@@ -58,21 +82,19 @@ jobs:
         env:
           GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
         run: |
-          sha=$(git -C src rev-parse HEAD)
+          sha=$(git rev-parse HEAD)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           python3 ciw/ci/status.py goodputai/goodput-infer-ext "$sha" pending             "ci/public-worker/e2e-$E2E_CASE" "running case $E2E_CASE${E2E_MUTATION:+ (mutation: $E2E_MUTATION)}"
       - name: Use job-local Rust toolchains
         run: echo "RUSTUP_HOME=$RUNNER_TEMP/gie-rustup" >> "$GITHUB_ENV"
       - id: pins
         name: Read pinned case configuration
-        working-directory: src
         run: python3 e2e/harness/ci.py env --case "$E2E_CASE" --format github >> "$GITHUB_OUTPUT"
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ steps.pins.outputs.python }}
       - name: Prepare hosted disk and select case storage
         id: disk
-        working-directory: src
         run: python3 e2e/harness/ci.py disk --case "$E2E_CASE" --stage prepare
       - uses: actions/cache@v4
         if: steps.pins.outputs.cache_paths != ''
@@ -80,27 +102,23 @@ jobs:
           path: ${{ steps.disk.outputs.resolved_paths }}
           key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.pins.outputs.cache_key }}
       - name: Require disk budget again after restoring caches
-        working-directory: src
         run: python3 e2e/harness/ci.py disk --case "$E2E_CASE" --stage check
-      - name: Fail loudly on engine_env cases (cross-repo action not resolvable here)
+      - uses: ./.github/actions/cpu-engine-env
         if: steps.pins.outputs.engine_env == 'true'
-        run: |
-          echo "::error::case $E2E_CASE requires cpu-engine-env from goodputai/goodput-infer-ext, which cannot be resolved in ci-worker. Handle this case in the ext repo CI."
-          exit 1
+        with:
+          sglang_commit: ${{ steps.pins.outputs.sglang_commit }}
+          dynamo: ${{ steps.pins.outputs.dynamo }}
       - name: Install declared Rust toolchain
         if: steps.pins.outputs.rust == 'true'
         env:
           TOOLCHAIN: ${{ steps.pins.outputs.toolchain }}
         run: rustup toolchain install "$TOOLCHAIN" --profile minimal --component rustc,cargo,rust-std,rustfmt,clippy
       - name: Install declared native prerequisites
-        working-directory: src
         run: python3 e2e/harness/ci.py apt --group case --case "$E2E_CASE"
       - name: Run declared setup, then the case
-        working-directory: src
         run: python3 e2e/harness/ci.py run --case "$E2E_CASE" --output "artifacts/$E2E_CASE"
       - name: Publish case table
         if: always()
-        working-directory: src
         run: |
           if [ -f "artifacts/$E2E_CASE/table.md" ]; then
             cat "artifacts/$E2E_CASE/table.md" >> "$GITHUB_STEP_SUMMARY"
@@ -109,7 +127,7 @@ jobs:
         if: always()
         with:
           name: e2e-${{ github.run_id }}-${{ github.run_attempt }}
-          path: src/artifacts/
+          path: artifacts/
           if-no-files-found: ignore
           retention-days: 7
       - name: Final status
