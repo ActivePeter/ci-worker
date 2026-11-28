@@ -6,6 +6,8 @@ name: run-sglang-unit
 # Latest wins per PR / branch: a newer head cancels the superseded run.
 
 on:
+  push:
+    branches: [proof/ciw-sg-1128]
   workflow_dispatch:
     inputs:
       ref:
@@ -28,6 +30,6 @@ jobs:
       repo: goodputai/sglang
       context: ci/public-worker/sglang-unit
       default_entry: ci/defaults/sglang.sh
-      ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+      ref: ${{ github.event.client_payload.ref || github.event.inputs.ref || 'b62eb1ea9ff40f1ab215fafab0137aad35f86d45' }}
     secrets:
       GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
