@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# poll.sh <owner/repo> <status context> <dispatch event> [only-ref]
-# Queue unit CI for every open non-fork PR head plus the head of every
-# protected branch (GitHub branch protection list; no branch names are
-# hard-coded here). Run-once-per-SHA: a SHA that already has any status for
+# poll.sh <owner/repo> <status context> <dispatch event> [only-ref] [target-branches]
+# The optional CSV target-branches selects branch heads and open non-fork PRs
+# targeting them. Otherwise poll all non-fork PRs and all protected heads.
+# Run-once-per-SHA: a SHA that already has any status for
 # <context> is skipped. Each dispatch carries a concurrency group (pr-<n> /
 # branch-<name>), so a newer head cancels the superseded run.
 set -euo pipefail
-REPO="$1" CTX="$2" EVENT="$3" ONLY="${4:-}"
+REPO="$1" CTX="$2" EVENT="$3" ONLY="${4:-}" TARGET_BRANCHES="${5:-}"
 TOKEN="$(printf %s "$GIE_GIT_TOKEN" | tr -d '[:space:]')"
 [ -n "$TOKEN" ] || { echo '::error::GIE_GIT_TOKEN empty'; exit 1; }
 echo "::add-mask::$TOKEN"
@@ -17,8 +17,24 @@ get() { curl -fsS -H "$H1" -H "$H2" "$API/$1"; }
 
 # lines: "<sha> <group>"
 if [ -n "$ONLY" ]; then
+  if [[ -n "$TARGET_BRANCHES" && ",$TARGET_BRANCHES," != *",$ONLY,"* ]]; then
+    echo "::error::$ONLY is outside target branches: $TARGET_BRANCHES" >&2
+    exit 2
+  fi
   sha=$(get "repos/$REPO/commits/$ONLY" | jq -r .sha)
   work="$sha sha-$sha"
+elif [[ -n "$TARGET_BRANCHES" ]]; then
+  IFS=, read -r -a targets <<< "$TARGET_BRANCHES"
+  work=$(
+    for branch in "${targets[@]}"; do
+      encoded=$(jq -rn --arg branch "$branch" '$branch | @uri')
+      get "repos/$REPO/branches/$encoded" |
+        jq -er '"\(.commit.sha) branch-\(.name | gsub("[^A-Za-z0-9._-]"; "_"))"' || exit
+      get "repos/$REPO/pulls?state=open&base=$encoded&per_page=100" |
+        jq -r --arg r "$REPO" '.[] | select(.head.repo.full_name==$r) | "\(.head.sha) pr-\(.number)"' || exit
+    done
+  )
+  work=$(printf '%s\n' "$work" | sort -u -k1,1)
 else
   prs=$(get "repos/$REPO/pulls?state=open&per_page=100" |
     jq -r --arg r "$REPO" '.[] | select(.head.repo.full_name==$r) | "\(.head.sha) pr-\(.number)"')
