@@ -1,0 +1,33 @@
+name: run-sglang-unit
+
+# Public CI for goodputai/sglang (CPU unit tests). Job DAG lives in unit.yml: prepare -> parallel
+# jobs from the tested SHA's .github/ci/public-unit.sh (or ci-worker's
+# ci/defaults/sglang.sh as "legacy default") -> report, the only writer of ci/public-worker/sglang-unit.
+# Latest wins per PR / branch: a newer head cancels the superseded run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "branch / tag / full SHA to run unit CI on"
+        required: true
+  repository_dispatch:
+    types: [run-sglang-unit]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run-sglang-unit-${{ github.event.client_payload.group || github.event.client_payload.ref || github.event.inputs.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    uses: ./.github/workflows/unit.yml
+    with:
+      repo: goodputai/sglang
+      context: ci/public-worker/sglang-unit
+      default_entry: ci/defaults/sglang.sh
+      ref: ${{ github.event.client_payload.ref || github.event.inputs.ref }}
+    secrets:
+      GIE_GIT_TOKEN: ${{ secrets.GIE_GIT_TOKEN }}
